@@ -21,7 +21,8 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
     # Explorer keeps the shell extension locked; releasing it lets the link step succeed.
-    [switch] $RestartExplorer
+    [switch] $RestartExplorer,
+    [switch] $Test
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +39,14 @@ $msbuild = Get-MsBuildPath
 & $msbuild (Join-Path $repoRoot 'CopyTool.slnx') `
     /p:Configuration=$Configuration /p:Platform=x64 /restore /v:minimal /nologo
 if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)." }
+
+if ($Test) {
+    Write-Host ''
+    Write-Host 'Running tests...' -ForegroundColor Cyan
+    & dotnet test (Join-Path $repoRoot 'tests\CopyTool.Tests\CopyTool.Tests.csproj') `
+        -c $Configuration --nologo -v quiet
+    if ($LASTEXITCODE -ne 0) { throw "Tests failed (exit $LASTEXITCODE)." }
+}
 
 Write-Host ''
 Write-Host "Output: $repoRoot\build\$Configuration" -ForegroundColor Green

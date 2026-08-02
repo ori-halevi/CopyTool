@@ -89,6 +89,7 @@ Installs to `%LOCALAPPDATA%\CopyTool\bin` and registers for the current user onl
 
 ```powershell
 .\build.ps1                        # Release, native + managed in one pass
+.\build.ps1 -Test                  # and run the test suite
 .\build.ps1 -Configuration Debug -RestartExplorer
 ```
 
@@ -117,12 +118,28 @@ CopyTool.Bench whoislocking <file>              # Restart Manager lookup
 The host writes to `%LOCALAPPDATA%\CopyTool\host.log` — it has no console, so that
 file is the only way to see what it did.
 
+## Tests
+
+```powershell
+dotnet test tests\CopyTool.Tests
+```
+
+42 tests over the real filesystem — the engine is almost entirely about what the
+filesystem actually does, so an abstraction would only agree with whatever the
+engine already believes.
+
+The suite is weighted towards **`MoveSafetyTests`**, because a move that deletes
+a source it never copied is the one bug class that destroys data. The engine
+shipped with exactly that: it deleted the sources of files parked for a conflict
+decision, waiting on elevation, or skipped because the destination was newer.
+Reintroducing that bug fails five of these tests and no others.
+
 ## Status
 
 Working: shell integration, copy engine, progress UI, pause/resume/cancel, conflict
 policies and dialog, elevation, preflight, install/uninstall.
 
-Known gaps are tracked in [docs/PLAN.md](docs/PLAN.md) §8.
+Known gaps are tracked in [docs/PLAN.md](docs/PLAN.md) §8 and §9.
 
 ## License
 

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <RootNamespace>CopyTool.Tests</RootNamespace>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <IsPackable>false</IsPackable>
+    <!-- Tests touch the real filesystem; xUnit's default parallelism would let
+         two of them fight over the same temp tree. -->
+    <ParallelizeTestCollections>false</ParallelizeTestCollections>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/CopyTool.Core/CopyTool.Core.csproj" />
+  </ItemGroup>
+</Project>

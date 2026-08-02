@@ -11,6 +11,9 @@
     <Project Path="src/CopyTool.Elevated/CopyTool.Elevated.csproj" />
     <Project Path="src/CopyTool.Bench/CopyTool.Bench.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CopyTool.Tests/CopyTool.Tests.csproj" />
+  </Folder>
   <Folder Name="/native/">
     <Project Path="src/CopyTool.ShellExt/CopyTool.ShellExt.vcxproj" />
   </Folder>
