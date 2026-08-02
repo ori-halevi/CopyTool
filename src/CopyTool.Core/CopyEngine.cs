@@ -422,6 +422,13 @@ public sealed class CopyEngine
         ScanItem[] items, string destinationRoot, VolumeProfile srcProfile, VolumeProfile dstProfile,
         ScanResult scan, ConcurrentBag<CopyFailure> failures, CancellationToken ct)
     {
+        if (items.Length == 0) return;
+
+        // One set of aligned blocks for the whole run. Only one large file is in
+        // flight at a time, so allocating per file bought nothing and cost the
+        // page faults every time.
+        using var pool = CopyBufferPool.For(srcProfile, dstProfile);
+
         // Large files already saturate the device from a single stream via the
         // internal read/write pipeline; running several in parallel only adds seeks.
         foreach (ScanItem item in items)
@@ -435,7 +442,7 @@ public sealed class CopyEngine
                 continue;
             }
 
-            await CopyLargeWithPolicyAsync(item, dst, srcProfile, dstProfile, scan, failures, ct)
+            await CopyLargeWithPolicyAsync(item, dst, srcProfile, dstProfile, scan, failures, pool, ct)
                 .ConfigureAwait(false);
 
             ReportProgress(scan, item.RelativePath);
@@ -448,7 +455,7 @@ public sealed class CopyEngine
     /// </summary>
     private async Task CopyLargeWithPolicyAsync(
         ScanItem item, string dst, VolumeProfile srcProfile, VolumeProfile dstProfile,
-        ScanResult scan, ConcurrentBag<CopyFailure> failures, CancellationToken ct)
+        ScanResult scan, ConcurrentBag<CopyFailure> failures, CopyBufferPool? pool, CancellationToken ct)
     {
         for (int attempt = 1; ; attempt++)
         {
@@ -470,6 +477,8 @@ public sealed class CopyEngine
                     queueDepth: null,               // taken from the volume profiles
                     control: Control,
                     backgroundPriority: Policies.BackgroundIo,
+                    knownSize: item.Size,
+                    pool: pool,
                     ct: ct);
 
                 // A single large file can take minutes. Without ticking here the

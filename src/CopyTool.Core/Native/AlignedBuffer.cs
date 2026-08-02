@@ -22,6 +22,7 @@ internal sealed unsafe class AlignedBuffer : MemoryManager<byte>
         _ptr = (byte*)NativeMemory.AlignedAlloc((nuint)length, (nuint)alignment);
     }
 
+    /// <summary>Block size, so a pool can tell whether it issued this one.</summary>
     public int Length => _length;
 
     public override Span<byte> GetSpan() => new(_ptr, _length);
@@ -34,6 +35,15 @@ internal sealed unsafe class AlignedBuffer : MemoryManager<byte>
 
     // The block never moves, so there is nothing to release.
     public override void Unpin() { }
+
+    /// <summary>
+    /// Releases the block.
+    ///
+    /// <see cref="MemoryManager{T}"/> implements IDisposable explicitly, so a
+    /// plain <c>Dispose()</c> on this type binds to the protected overload and
+    /// will not compile. This is the name to call.
+    /// </summary>
+    public void Free() => ((IDisposable)this).Dispose();
 
     protected override void Dispose(bool disposing)
     {

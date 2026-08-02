@@ -31,10 +31,10 @@ public static class FileCopier
         JobControl? control = null,
         bool backgroundPriority = false,
         long knownSize = 0,
+        CopyBufferPool? pool = null,
         CancellationToken ct = default)
     {
-        int sector = Math.Max(srcProfile.BytesPerSector, dstProfile.BytesPerSector);
-        int chunk  = Math.Max(sector, (Math.Min(srcProfile.ChunkSize, dstProfile.ChunkSize) / sector) * sector);
+        (int chunk, int sector) = PlanChunk(srcProfile, dstProfile);
 
         // The slower side sets the pace: queuing 8 deep against a USB disk because
         // the other end is NVMe only produces thrashing.
@@ -66,7 +66,19 @@ public static class FileCopier
 
         async Task RunSlot()
         {
-            using var buffer = new AlignedBuffer(chunk, sector);
+            AlignedBuffer buffer = pool?.Rent(chunk, sector) ?? new AlignedBuffer(chunk, sector);
+            try
+            {
+                await RunSlotCore(buffer).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (pool is not null) pool.Return(buffer); else buffer.Free();
+            }
+        }
+
+        async Task RunSlotCore(AlignedBuffer buffer)
+        {
             Memory<byte> memory = buffer.Memory;
 
             while (true)
@@ -130,6 +142,20 @@ public static class FileCopier
     {
         int hint = (int)Win32.IoPriorityHint.Low;
         Win32.SetFileIoPriorityHint(handle, Win32.FileIoPriorityHintInfo, in hint, sizeof(int));
+    }
+
+    /// <summary>
+    /// Transfer size and alignment for a copy between two volumes.
+    ///
+    /// Shared with <see cref="CopyBufferPool"/> so the pool hands out blocks of
+    /// exactly the shape the pipeline will ask for — otherwise every rent would
+    /// miss and the pool would be an elaborate way to allocate.
+    /// </summary>
+    public static (int Chunk, int Sector) PlanChunk(VolumeProfile source, VolumeProfile destination)
+    {
+        int sector = Math.Max(source.BytesPerSector, destination.BytesPerSector);
+        int chunk = Math.Max(sector, (Math.Min(source.ChunkSize, destination.ChunkSize) / sector) * sector);
+        return (chunk, sector);
     }
 
     private static int RoundUp(long value, int multiple) =>

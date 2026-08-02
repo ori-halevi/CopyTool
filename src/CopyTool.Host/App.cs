@@ -137,6 +137,14 @@ internal sealed class App : Application
         {
             // Scanning a large tree blocks; keep it off the UI thread.
             CopyReport report;
+
+            // The permission probe takes no dependency on the scan — it opens the
+            // destination and each source root — so it runs alongside the tree
+            // walk instead of behind it. On a network destination that probe is
+            // hundreds of milliseconds of pure latency on the critical path.
+            Task<ElevationCheck> elevationCheck = Task.Run(
+                () => ElevationCheck.Run(job.Sources, job.Destination), control.Token);
+
             ScanResult scan = await Task.Run(() => Scanner.Scan(job.Sources, control.Token));
             var (tiny, small, medium, large) = scan.Histogram;
             HostLog.Write($"  scan: {scan.FileCount:N0} files, {scan.TotalBytes / 1024.0 / 1024:N1} MB " +
@@ -171,10 +179,8 @@ internal sealed class App : Application
             if (preflight.Warnings.Any())
                 vm.SetWarnings(preflight.Warnings.Select(Text.Describe).ToArray());
 
-            // Permission preflight, so the banner is up immediately rather than
-            // after the job has already hit the wall.
-            ElevationCheck check = await Task.Run(
-                () => ElevationCheck.Run(job.Sources, job.Destination), control.Token);
+            // Started before the scan; by now it has almost certainly finished.
+            ElevationCheck check = await elevationCheck;
             if (check.AnythingNeedsElevation)
                 HostLog.Write($"  preflight: destination blocked={check.DestinationNeedsElevation}, " +
                               $"unreadable sources={check.UnreadableSources.Count}");
