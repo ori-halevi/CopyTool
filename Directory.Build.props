@@ -1,0 +1,23 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <!-- Must stay false. WPF resolves a specific culture for every binding that
+         has a converter, and under invariant globalization that throws
+         "Cannot find non-neutral culture related to 'en-us'". This app also
+         formats Hebrew text and compares Hebrew paths, so culture data is
+         genuinely needed rather than merely tolerated. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- x64 everywhere. The shell extension has to match explorer.exe, and the
+         managed side is full of x64 P/Invoke — so there is no Any CPU story to
+         tell, and declaring it keeps one solution configuration valid for both
+         the C++ and the .NET projects. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+</Project>

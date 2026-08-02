@@ -1,0 +1,7 @@
+{
+  "//": "Pinned to 9.x so Visual Studio 2022's MSBuild (17.14) can build the whole solution. SDK 10.x requires MSBuild 18+, which VS 2022 does not ship.",
+  "sdk": {
+    "version": "9.0.314",
+    "rollForward": "latestPatch"
+  }
+}

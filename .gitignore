@@ -1,0 +1,107 @@
+# ==========================================================================
+#  CopyTool
+#
+#  Tailored to what this repo actually produces: a C++ shell extension built
+#  with MSVC, three .NET projects, and a shared build\ directory that both
+#  halves write into.
+# ==========================================================================
+
+# --- shared output --------------------------------------------------------
+# build.ps1 sends everything here: the DLL, the three exes and their deps.
+build/
+
+# --- .NET -----------------------------------------------------------------
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userprefs
+
+# Local publish output.
+publish/
+*.pubxml.user
+
+# --- C++ / MSVC -----------------------------------------------------------
+# Intermediates land next to the sources whenever OutDir is not honoured —
+# building the .vcxproj directly from the IDE, for instance.
+*.obj
+*.pch
+*.ipch
+*.idb
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.tlog
+*.iobj
+*.ipdb
+*.res
+*.tli
+*.tlh
+*.lastbuildstate
+*.aps
+*.ncb
+*.sdf
+*.opensdf
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+
+# --- Visual Studio --------------------------------------------------------
+.vs/
+*.sln.docstates
+*.psess
+*.vsp
+*.vspx
+
+# --- VS Code --------------------------------------------------------------
+# Editor configuration is local, not part of the project.
+.vscode/
+
+# --- Rider / ReSharper ----------------------------------------------------
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+# --- NuGet ----------------------------------------------------------------
+packages/
+*.nupkg
+*.snupkg
+project.lock.json
+project.assets.json
+
+# --- tests and coverage ---------------------------------------------------
+# For tests/CopyTool.Tests once it exists.
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# --- benchmark and scratch data -------------------------------------------
+# CopyTool.Bench fixtures run to multiple GB. They must never reach a commit.
+*.bin
+bench/
+scratch/
+
+# --- Windows and editor litter --------------------------------------------
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*~
+*.bak
+*.tmp
+*.orig
+*.rej
+
+# --- kept on purpose ------------------------------------------------------
+# global.json pins the SDK to 9.x so that VS 2022's MSBuild can build the
+# whole solution; losing it silently breaks the build for anyone who clones.
+!global.json
+!Directory.Build.props

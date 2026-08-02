@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- WinExe, not Exe: the host must never flash a console window. -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <RootNamespace>CopyTool.Host</RootNamespace>
+    <AssemblyName>CopyTool.Host</AssemblyName>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWPF>true</UseWPF>
+    <!-- The entry point is Program.Main, not a generated App.xaml one: the host
+         must decide whether to become the server before any UI exists. -->
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <StartupObject>CopyTool.Host.Program</StartupObject>
+
+    <!-- Land next to CopyTool.ShellExt.dll: the handler starts the host from its
+         own directory, so both have to share one output folder. -->
+    <RepoRoot>$(MSBuildThisFileDirectory)..\..\</RepoRoot>
+    <OutputPath>$(RepoRoot)build\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CopyTool.Core/CopyTool.Core.csproj" />
+  </ItemGroup>
+</Project>

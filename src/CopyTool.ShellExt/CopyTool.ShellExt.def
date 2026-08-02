@@ -1,0 +1,7 @@
+; No LIBRARY line: the linker derives the module name from /OUT, and stating it
+; here only produces LNK4070 when they differ.
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- WinExe: this process must never show a console, and never any UI at all.
+         An elevated window is a UIPI attack surface and cannot accept drag-drop
+         from Explorer, which is why all UI stays in the medium-IL host. -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <RootNamespace>CopyTool.Elevated</RootNamespace>
+    <AssemblyName>CopyTool.Elevated</AssemblyName>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+
+    <RepoRoot>$(MSBuildThisFileDirectory)..\..\</RepoRoot>
+    <OutputPath>$(RepoRoot)build\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+
+    <!-- No requestedExecutionLevel manifest on purpose: the host elevates this
+         explicitly with ShellExecuteEx "runas" only when a job actually needs it.
+         Baking "requireAdministrator" in would force a prompt every single run. -->
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CopyTool.Core/CopyTool.Core.csproj" />
+  </ItemGroup>
+</Project>

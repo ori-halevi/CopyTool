@@ -1,0 +1,17 @@
+<Solution>
+  <!-- x64 only: the shell extension must match explorer.exe's bitness. -->
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/src/">
+    <Project Path="src/CopyTool.Core/CopyTool.Core.csproj" />
+    <Project Path="src/CopyTool.Host/CopyTool.Host.csproj" />
+    <Project Path="src/CopyTool.Elevated/CopyTool.Elevated.csproj" />
+    <Project Path="src/CopyTool.Bench/CopyTool.Bench.csproj" />
+  </Folder>
+  <Folder Name="/native/">
+    <Project Path="src/CopyTool.ShellExt/CopyTool.ShellExt.vcxproj" />
+  </Folder>
+</Solution>
