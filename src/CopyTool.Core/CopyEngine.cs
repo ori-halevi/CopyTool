@@ -29,9 +29,21 @@ public sealed record CopyReport
     public required string Strategy { get; init; }
     public required IReadOnlyList<CopyFailure> Failures { get; init; }
     public required IReadOnlyList<SkippedItem> Skipped { get; init; }
+
+    /// <summary>
+    /// Everything the job parked, of every kind — name conflicts, locked files,
+    /// I/O errors and permission problems alike. One list, because they are one
+    /// mechanism: filter by <see cref="PendingDecision.Kind"/> to pick a resolver.
+    /// </summary>
     public required IReadOnlyList<PendingDecision> Pending { get; init; }
+
     /// <summary>Items blocked purely by permissions — a question, not a failure.</summary>
-    public required IReadOnlyList<string> NeedsElevation { get; init; }
+    public IEnumerable<PendingDecision> NeedsElevation =>
+        Pending.Where(p => p.Kind == DecisionKind.NeedsElevation);
+
+    /// <summary>Items a person has to answer, as opposed to the OS.</summary>
+    public IEnumerable<PendingDecision> NeedsAnswer =>
+        Pending.Where(p => p.Kind != DecisionKind.NeedsElevation);
 
     public double BytesPerSecond => Elapsed.TotalSeconds > 0 ? BytesCopied / Elapsed.TotalSeconds : 0;
 }
@@ -66,12 +78,18 @@ public sealed class CopyEngine
     }
 
     private readonly ConcurrentBag<SkippedItem> _skipped = [];
-    private readonly ConcurrentBag<PendingDecision> _pending = [];
-    private readonly ConcurrentBag<(string Source, string Destination, long Size)> _needsElevation = [];
 
-    // Counted separately from the bags they mirror: ConcurrentBag.Count locks every
-    // per-thread queue, and progress is reported five times a second.
-    private int _skippedCount, _pendingCount, _needsElevationCount;
+    /// <summary>
+    /// Everything the job parked, of every kind. A queue rather than a bag so a
+    /// caller holding an elevated worker can drain the permission items while the
+    /// copy is still running.
+    /// </summary>
+    private readonly ConcurrentQueue<PendingDecision> _pending = new();
+
+    // Counted separately from the collections they mirror: Count on a concurrent
+    // collection is not free, and progress is reported five times a second. Split
+    // by audience — a question for a person, versus consent for the OS.
+    private int _skippedCount, _pendingCount, _elevationCount;
 
     /// <summary>
     /// Sources whose contents are now at the destination — the only files a move
@@ -91,28 +109,41 @@ public sealed class CopyEngine
     /// </summary>
     private readonly HashSet<string> _blockedDirectories = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Items the job could not write for permission reasons. The preflight catches
-    /// most of these before the copy starts; anything with a per-folder ACL deeper
-    /// in the tree lands here instead — and still never stops the job.
-    /// </summary>
-    public IReadOnlyCollection<(string Source, string Destination, long Size)> NeedsElevation =>
-        _needsElevation.ToArray();
+    /// <summary>How many parked items of a given kind are still outstanding.</summary>
+    public int CountPending(DecisionKind kind) =>
+        kind == DecisionKind.NeedsElevation
+            ? Volatile.Read(ref _elevationCount)
+            : _pending.Count(p => p.Kind == kind);
 
     /// <summary>
-    /// Takes one parked permission item, if there is one.
+    /// Takes one parked item of the given kind, if there is one.
     ///
-    /// Lets a caller that already holds an elevated worker drain these while the
-    /// copy is still running, so a consent given up front covers the whole job
-    /// instead of only what was known at the moment it was granted.
+    /// Lets a caller that already holds an elevated worker drain permission items
+    /// while the copy is still running, so a consent given up front covers the
+    /// whole job instead of only what was known when it was granted.
+    ///
+    /// Items of other kinds are rotated to the back rather than dropped. Parked
+    /// items are exceptional, so the queue is short and the rotation is cheap.
     /// </summary>
-    public bool TryTakeNeedsElevation(out (string Source, string Destination, long Size) item)
+    public bool TryTakePending(DecisionKind kind, out PendingDecision item)
     {
-        if (_needsElevation.TryTake(out item))
+        for (int budget = _pending.Count; budget > 0; budget--)
         {
-            Interlocked.Decrement(ref _needsElevationCount);
-            return true;
+            if (!_pending.TryDequeue(out PendingDecision? candidate)) break;
+
+            if (candidate.Kind == kind)
+            {
+                if (kind == DecisionKind.NeedsElevation) Interlocked.Decrement(ref _elevationCount);
+                else Interlocked.Decrement(ref _pendingCount);
+
+                item = candidate;
+                return true;
+            }
+
+            _pending.Enqueue(candidate);
         }
+
+        item = null!;
         return false;
     }
 
@@ -168,7 +199,6 @@ public sealed class CopyEngine
                     BytesCopied = scan.TotalBytes, FilesCopied = renamed, Elapsed = clock.Elapsed,
                     Strategy = "same-volume rename", Failures = failures.ToArray(),
                     Skipped = _skipped.ToArray(), Pending = _pending.ToArray(),
-                    NeedsElevation = _needsElevation.Select(i => i.Source).ToArray(),
                 };
             }
 
@@ -211,7 +241,6 @@ public sealed class CopyEngine
             Failures = failures.ToArray(),
             Skipped = _skipped.ToArray(),
             Pending = _pending.ToArray(),
-            NeedsElevation = _needsElevation.Select(i => i.Source).ToArray(),
         };
     }
 
@@ -284,7 +313,6 @@ public sealed class CopyEngine
             Failures = failures.ToArray(),
             Skipped = [],
             Pending = [],
-            NeedsElevation = [],
         };
     }
 
@@ -537,7 +565,7 @@ public sealed class CopyEngine
             case ResolutionAction.Defer:
                 // Reuse the metadata Resolve already read; re-deriving it here cost
                 // three extra syscalls per deferred file, and "Ask" is the default.
-                _pending.Add(new PendingDecision(
+                _pending.Enqueue(new PendingDecision(
                     r.Reason == SkipReason.Identical ? DecisionKind.Identical : DecisionKind.NameConflict,
                     item.SourcePath, planned,
                     item.Size, r.DestinationSize, r.SourceModified, r.DestinationModified));
@@ -578,8 +606,11 @@ public sealed class CopyEngine
     /// </param>
     private void RecordNeedsElevation(ScanItem item, string dst, bool account = true)
     {
-        _needsElevation.Add((item.SourcePath, dst, item.Size));
-        Interlocked.Increment(ref _needsElevationCount);
+        _pending.Enqueue(new PendingDecision(
+            DecisionKind.NeedsElevation, item.SourcePath, dst,
+            item.Size, ConflictResolver.SafeSize(dst),
+            item.Modified, ConflictResolver.SafeWriteTime(dst)));
+        Interlocked.Increment(ref _elevationCount);
         if (account) AccountNotWritten(item.Size);
     }
 
@@ -600,7 +631,7 @@ public sealed class CopyEngine
 
         if (defer)
         {
-            _pending.Add(new PendingDecision(
+            _pending.Enqueue(new PendingDecision(
                 locked ? DecisionKind.Locked : DecisionKind.IoError,
                 item.SourcePath, dst, item.Size, ConflictResolver.SafeSize(dst),
                 ConflictResolver.SafeWriteTime(item.SourcePath),
@@ -732,7 +763,7 @@ public sealed class CopyEngine
             // second while workers are pushing into those same bags.
             PendingCount = Volatile.Read(ref _pendingCount),
             SkippedCount = Volatile.Read(ref _skippedCount),
-            NeedsElevationCount = Volatile.Read(ref _needsElevationCount),
+            NeedsElevationCount = Volatile.Read(ref _elevationCount),
         });
     }
 }

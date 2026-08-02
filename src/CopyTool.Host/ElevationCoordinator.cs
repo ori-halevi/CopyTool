@@ -115,14 +115,13 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
         bool didWork = false;
 
         while (!ct.IsCancellationRequested && _session.IsOpen &&
-               _engine.TryTakeNeedsElevation(out var item))
+               _engine.TryTakePending(DecisionKind.NeedsElevation, out PendingDecision item))
         {
             didWork = true;
-            bool ok = await _session.CopyAsync(item.Source, item.Destination, item.Size, ct)
+            bool ok = await _session.CopyAsync(item.Source, item.Destination, item.SourceSize, ct)
                                     .ConfigureAwait(false);
             if (!ok && !_session.IsOpen)
             {
-                // Worker died mid-drain: put it back so it is still reported.
                 _vm.SetElevationMessage(Text.Describe(ElevationError.WorkerStopped), resolved: false);
                 break;
             }
@@ -149,7 +148,7 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
 
         if (_session.IsOpen) await DrainOnceAsync(ct).ConfigureAwait(false);
 
-        int remaining = _engine.NeedsElevation.Count;
+        int remaining = _engine.CountPending(DecisionKind.NeedsElevation);
         if (remaining == 0)
         {
             if (_session.Copied > 0)

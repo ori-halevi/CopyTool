@@ -255,14 +255,16 @@ internal sealed class App : Application
     private static async Task<CopyReport?> ResolveConflictsAsync(
         CopyReport report, CopyEngine engine, JobViewModel vm, JobControl control, ProgressWindow window)
     {
-        if (report.Pending.Count == 0 || control.IsCancelled) return null;
+        // Permission items are answered by a UAC prompt, not by this dialog.
+        var answerable = report.NeedsAnswer.ToArray();
+        if (answerable.Length == 0 || control.IsCancelled) return null;
 
-        var vmConflicts = new ConflictViewModel(report.Pending);
+        var vmConflicts = new ConflictViewModel(answerable);
         var dialog = new ConflictWindow(vmConflicts) { Owner = window.IsLoaded ? window : null };
 
         if (dialog.ShowDialog() != true || dialog.Result is not { Count: > 0 } list)
         {
-            HostLog.Write($"  conflicts: {report.Pending.Count} left unresolved");
+            HostLog.Write($"  conflicts: {answerable.Length} left unresolved");
             return null;
         }
 

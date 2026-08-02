@@ -190,9 +190,10 @@ CopyTool.Elevated.exe        C#    worker בלי UI, high IL, קצר-חיים
 
 **נסגר:** הפרדת הניסוח מ-Core. ‏`CopyTool.Core`, ‏`CopyTool.Elevated` ו-`CopyTool.Bench` מכילים **אפס** מחרוזות עברית; Core מדווח `PreflightCode` / `SkipReason` / `DecisionKind` + מספרים, וכל הניסוח ב-[`Host/Ui/Text.cs`](../src/CopyTool.Host/Ui/Text.cs). ‏`CopyFailure.Reason` מכיל עכשיו **רק** טקסט גולמי של מערכת ההפעלה — ניתן לתעד ולחפש.
 
+**נסגר:** מנגנון חניה אחד. ‏`DecisionKind.NeedsElevation` יושב באותו תור עם התנגשויות, קבצים נעולים ושגיאות I/O; ‏`CopyReport.Pending` הוא רשימה אחת, ו-`NeedsAnswer` / `NeedsElevation` הם סינון לפי מי שאמור לענות — אדם או מערכת ההפעלה. ה-Host כבר לא עוקף את הדוח שקיבל.
+
 **עדיין פתוח:**
 
-- **"דורש הרשאות" הוא מנגנון מקביל ל-`PendingDecision`** במקום `DecisionKind` נוסף. יש לו bag, מונה, שדה ב-progress ושדה ב-report משלו, ו-`ResolveElevationAsync` משכפל את הצורה של `ResolveConflictsAsync`. איחוד = מנגנון חניה אחד.
 - **בריכת buffers לקבצים גדולים** — ‏16MB alloc/free לכל קובץ, למרות שקובץ גדול אחד מועתק בכל רגע.
 - **ה-preflight רץ אחרי הסריקה** למרות שאינו תלוי בה; אפשר במקביל.
 - **worker נפרד לכל ג'וב** שדורש הרמה (מקרה קצה 9).

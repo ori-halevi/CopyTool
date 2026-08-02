@@ -72,10 +72,10 @@ public class ReportingTests
 
     private static long Untouched(ScanResult scan, CopyReport report)
     {
-        // Everything the job deliberately did not write.
+        // Everything the job deliberately did not write. Pending covers every kind
+        // now, permission problems included.
         var names = report.Skipped.Select(s => s.Source)
             .Concat(report.Pending.Select(p => p.Source))
-            .Concat(report.NeedsElevation)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         return scan.Files.Where(f => names.Contains(f.SourcePath)).Sum(f => f.Size);

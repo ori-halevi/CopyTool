@@ -334,7 +334,7 @@ static void PrintReport(CopyReport r)
     Console.WriteLine($"elapsed    {r.Elapsed.TotalSeconds:F2} s   ({Bytes((long)r.BytesPerSecond)}/s)");
     Console.WriteLine($"skipped    {r.Skipped.Count}");
     Console.WriteLine($"pending    {r.Pending.Count}");
-    Console.WriteLine($"needs-elev {r.NeedsElevation.Count}   <- permission questions, not failures");
+    Console.WriteLine($"needs-elev {r.NeedsElevation.Count()}   <- permission questions, not failures");
     if (r.Failures.Count > 0)
     {
         Console.WriteLine($"failures   {r.Failures.Count}");

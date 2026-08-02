@@ -35,7 +35,13 @@ public sealed class JobPolicies
     public bool BackgroundIo { get; set; }
 }
 
-public enum DecisionKind { NameConflict, Identical, Locked, IoError }
+/// <summary>
+/// Why an item is waiting. Elevation is one of these rather than a mechanism of
+/// its own: it is the same shape of problem — the job could not decide alone, so
+/// the item is parked and the copy carries on — and the only difference is who
+/// answers, a dialog or a UAC prompt.
+/// </summary>
+public enum DecisionKind { NameConflict, Identical, Locked, IoError, NeedsElevation }
 
 /// <summary>Why an item was not copied. A code, so the wording lives in the UI.</summary>
 public enum SkipReason
