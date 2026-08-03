@@ -65,7 +65,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
                 new PolicyOption("שאל", ElevationPolicy.Ask),
                 new PolicyOption("הרם מיד", ElevationPolicy.ElevateNow),
                 new PolicyOption("דלג על מוגנים", ElevationPolicy.SkipProtected),
-            ], () => policies.Elevation, v => policies.Elevation = (ElevationPolicy)v, ElevationPolicy.Ask),
+            ], () => policies.Elevation, v => SetElevationPolicy((ElevationPolicy)v), ElevationPolicy.Ask),
 
             new PolicyChip("אימות",
             [
@@ -295,12 +295,38 @@ public sealed class JobViewModel : INotifyPropertyChanged
 
     public event Action? ElevationRequested;
 
-    public void RequestElevation()
+    /// <summary>
+    /// "Elevate now" means now. Picking it is the answer to a question the job has
+    /// not asked yet, so the prompt goes up on the click rather than waiting for
+    /// something to be refused first — that is the whole point of choosing it: to
+    /// walk away and come back to a finished copy.
+    ///
+    /// If the job has not started (it is still waiting its turn in the queue) there
+    /// is nothing to elevate into yet. The policy is set, and the coordinator
+    /// raises the prompt when the job starts.
+    /// </summary>
+    private void SetElevationPolicy(ElevationPolicy value)
     {
-        if (!CanRequestElevation) return;
+        Policies.Elevation = value;
+        if (value == ElevationPolicy.ElevateNow) RequestElevation(preAuthorise: true);
+    }
+
+    /// <param name="preAuthorise">
+    /// Ask even when nothing is known to need admin rights yet. The banner button
+    /// never does this — it exists precisely because something already was refused.
+    /// </param>
+    public void RequestElevation(bool preAuthorise = false)
+    {
+        if (!preAuthorise && !CanRequestElevation) return;
+        if (preAuthorise && (_elevationBusy || _elevationResolved)) return;
+
+        // Nobody is listening yet: the job is still queued. Leaving the button
+        // disabled after a click that did nothing would be the worse lie.
+        if (ElevationRequested is null) return;
+
         _elevationBusy = true;
         Notify(nameof(CanRequestElevation));
-        ElevationRequested?.Invoke();
+        ElevationRequested.Invoke();
     }
 
     public void SetElevationNeeded(int count)

@@ -7,7 +7,16 @@
     <!-- Tests touch the real filesystem; xUnit's default parallelism would let
          two of them fight over the same temp tree. -->
     <ParallelizeTestCollections>false</ParallelizeTestCollections>
+    <!-- The policy chips are view-model logic and belong under test. Referencing
+         the host pulls in WPF types, which is why this is set here too. -->
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- UseWPF swaps the implicit-using set for the desktop one, which drops
+         System.IO. These tests are almost entirely about the filesystem. -->
+    <Using Include="System.IO" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
@@ -17,5 +26,6 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/CopyTool.Core/CopyTool.Core.csproj" />
+    <ProjectReference Include="../../src/CopyTool.Host/CopyTool.Host.csproj" />
   </ItemGroup>
 </Project>

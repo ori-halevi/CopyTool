@@ -247,6 +247,23 @@ internal sealed class App : Application
     {
         HostLog.Write($"job {job.Id}: {operation} {job.Sources.Length} source(s) -> {job.Destination}");
 
+        var engine = new CopyEngine
+        {
+            Control = control,
+            Policies = policies,
+            // Constructed on the UI thread, so reports arrive there too.
+            Progress = new Progress<CopyProgress>(vm.Update),
+        };
+
+        // Built before the scan, not after it, because the window is already up and
+        // its chips are already clickable. Picking "elevate now" while a large tree
+        // is still being walked has to raise the prompt then, not once the walk
+        // happens to finish.
+        await using var elevation = new ElevationCoordinator(engine, vm, policies);
+
+        void OnElevationRequested() => _ = elevation.OpenAsync(control.Token);
+        vm.ElevationRequested += OnElevationRequested;
+
         try
         {
             // Scanning a large tree blocks; keep it off the UI thread.
@@ -263,14 +280,6 @@ internal sealed class App : Application
             var (tiny, small, medium, large) = scan.Histogram;
             HostLog.Write($"  scan: {scan.FileCount:N0} files, {scan.TotalBytes / 1024.0 / 1024:N1} MB " +
                           $"(tiny={tiny} small={small} medium={medium} large={large})");
-
-            var engine = new CopyEngine
-            {
-                Control = control,
-                Policies = policies,
-                // Constructed on the UI thread, so reports arrive there too.
-                Progress = new Progress<CopyProgress>(vm.Update),
-            };
 
             // Everything cheap to check and expensive to discover late: no space,
             // a name the destination cannot represent, a folder copied into itself.
@@ -299,28 +308,13 @@ internal sealed class App : Application
                 HostLog.Write($"  preflight: destination blocked={check.DestinationNeedsElevation}, " +
                               $"unreadable sources={check.UnreadableSources.Count}");
 
-            await using var elevation = new ElevationCoordinator(engine, vm, policies);
+            // "Elevate now" means now — the prompt goes up before the first byte
+            // moves, so the permission is already in hand when the copy reaches a
+            // protected file. Held open for the rest of the job, one consent covers
+            // whatever it runs into later on.
+            await elevation.PrepareAsync(check.AnythingNeedsElevation, control.Token);
 
-            // The banner button now works during the copy, not only after it: with
-            // the session held open, one consent covers whatever the job runs into
-            // later on.
-            void OnElevationRequested() => _ = elevation.OpenAsync(control.Token);
-            vm.ElevationRequested += OnElevationRequested;
-
-            try
-            {
-                // "Elevate now" means now — the prompt goes up before the first
-                // byte moves, so the permission is already in hand when the copy
-                // reaches a protected file.
-                await elevation.PrepareAsync(check.AnythingNeedsElevation, control.Token);
-
-                CopyReport report0 = await engine.RunAsync(scan, job.Destination, operation, control.Token);
-                report = report0;
-            }
-            finally
-            {
-                vm.ElevationRequested -= OnElevationRequested;
-            }
+            report = await engine.RunAsync(scan, job.Destination, operation, control.Token);
 
             vm.Finish(report, cancelled: control.IsCancelled);
 
@@ -356,6 +350,10 @@ internal sealed class App : Application
         catch (Exception e)
         {
             HostLog.Write($"  job {job.Id} threw: {e}");
+        }
+        finally
+        {
+            vm.ElevationRequested -= OnElevationRequested;
         }
     }
 
@@ -453,12 +451,15 @@ internal sealed class App : Application
         var decided = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         void OnClosed(object? s, EventArgs e) => decided.TrySetResult(false);
-        async void OnRequested()
+
+        // Watches the coordinator rather than the request, because the request is
+        // already wired for the whole job. Subscribing to it twice here would mean
+        // two calls to OpenAsync, and the second one — refused by the single-flight
+        // guard — would read as a refusal by the user.
+        async void OnOpened(bool opened)
         {
-            if (await elevation.OpenAsync(control.Token).ConfigureAwait(false))
-                decided.TrySetResult(await elevation.FinishAsync(control.Token).ConfigureAwait(false));
-            else
-                decided.TrySetResult(false);
+            if (!opened) { decided.TrySetResult(false); return; }
+            decided.TrySetResult(await elevation.FinishAsync(control.Token).ConfigureAwait(false));
         }
 
         // Closing the window is the other valid answer to "may I elevate?" — but
@@ -468,7 +469,7 @@ internal sealed class App : Application
         if (window is null) return false;
 
         window.Closed += OnClosed;
-        vm.ElevationRequested += OnRequested;
+        elevation.Opened += OnOpened;
         try
         {
             return await decided.Task;
@@ -476,7 +477,7 @@ internal sealed class App : Application
         finally
         {
             window.Closed -= OnClosed;
-            vm.ElevationRequested -= OnRequested;
+            elevation.Opened -= OnOpened;
         }
     }
 

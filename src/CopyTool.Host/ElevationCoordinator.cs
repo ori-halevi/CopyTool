@@ -34,16 +34,21 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
     public int Copied => _session.Copied;
     public int Failed => _session.Failed;
 
+    /// <summary>Raised whenever an attempt to open the session settles, either way.</summary>
+    public event Action<bool>? Opened;
+
     /// <summary>
     /// Called once the preflight knows whether anything is out of reach. With the
     /// policy set to "elevate now" this is where the UAC prompt happens — before
     /// the copy, not after it.
+    ///
+    /// The prompt is not conditional on the preflight having found something. A job
+    /// can be refused a file it has not reached yet, and "elevate now" is the user
+    /// saying they would rather answer once, up front, than be asked later.
     /// </summary>
     public async Task PrepareAsync(bool destinationNeedsElevation, CancellationToken ct)
     {
-        if (!destinationNeedsElevation) return;
-
-        _vm.SetElevationNeeded(1);
+        if (destinationNeedsElevation) _vm.SetElevationNeeded(1);
 
         if (_policies.Elevation == ElevationPolicy.ElevateNow)
             await OpenAsync(ct).ConfigureAwait(false);
@@ -52,7 +57,11 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
     /// <summary>Raises the prompt and starts draining. Safe to call more than once.</summary>
     public async Task<bool> OpenAsync(CancellationToken ct)
     {
-        if (_session.IsOpen) return true;
+        if (_session.IsOpen)
+        {
+            Opened?.Invoke(true);
+            return true;
+        }
 
         // A second click while the prompt is up would mean two dialogs and two
         // workers.
@@ -76,11 +85,16 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
                     ElevationOutcome.NotPermitted => "נדרש חשבון מנהל — פריטים מוגנים לא יועתקו",
                     _ => Text.Describe(error),
                 }, resolved: false);
+                Opened?.Invoke(false);
                 return false;
             }
 
-            _vm.SetElevationMessage("מעתיק פריטים מוגנים בהרשאות מנהל…", resolved: false);
+            // Nothing is necessarily waiting: consent may have been given up front,
+            // before anything was refused. The pump then sits ready for whatever the
+            // copy runs into later, which is exactly what was asked for.
+            _vm.SetElevationMessage("הרשאות מנהל מוכנות — פריטים מוגנים יועתקו", resolved: false);
             StartPump();
+            Opened?.Invoke(true);
             return true;
         }
         finally
