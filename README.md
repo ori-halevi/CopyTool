@@ -45,6 +45,29 @@ There is also a **background I/O priority** mode. On an idle disk it costs nothi
 measurable (2.95 s vs 2.98 s on a 4 GB copy); under contention it yields, so a
 copy stops making video playback stutter.
 
+## Verification
+
+Optional, per job, from the **אימות** chip. Every copied file is read back and
+compared to its source; a mismatch deletes the destination and records a failure,
+because a file of the right name and the right length holding the wrong bytes is
+the one corruption every later check misses — including this tool's own
+"identical, skip it" fast path on the next run.
+
+Measured on 1 GB, C: → G:
+
+| | |
+|---|---|
+| off | 0.75 s |
+| on | 2.33 s |
+
+The bytes move through the disk three times instead of one, so roughly 3× is the
+honest expectation. SHA-256 rather than a faster non-cryptographic hash: with
+hardware acceleration it runs well ahead of any drive this tool will meet, so the
+disk is the bottleneck either way — and Core keeps its zero dependencies.
+
+A same-volume move reports nothing verified, and that is correct: a rename moves
+no bytes, so reading the file back would be comparing it with itself.
+
 ## Architecture
 
 ```

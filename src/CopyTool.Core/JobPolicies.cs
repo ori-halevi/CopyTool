@@ -7,6 +7,14 @@ public enum IoErrorPolicy { Ask, RetryThrice, SkipAndLog }
 public enum ElevationPolicy { Ask, ElevateNow, SkipProtected }
 
 /// <summary>
+/// Whether to read every copied file back and confirm it matches.
+///
+/// Roughly doubles the time, because the bytes move through the disk twice. Worth
+/// it when the copy is the archive.
+/// </summary>
+public enum VerifyPolicy { Off, EveryFile }
+
+/// <summary>
 /// What happens when the job hits something that would otherwise stop it.
 ///
 /// Every policy is decided up front and can be changed while the job runs — the
@@ -26,6 +34,7 @@ public sealed class JobPolicies
     public LockedPolicy Locked { get; set; } = LockedPolicy.Retry;
     public IoErrorPolicy IoError { get; set; } = IoErrorPolicy.RetryThrice;
     public ElevationPolicy Elevation { get; set; } = ElevationPolicy.Ask;
+    public VerifyPolicy Verify { get; set; } = VerifyPolicy.Off;
 
     /// <summary>
     /// Run the transfer at low I/O priority so the rest of the machine stays

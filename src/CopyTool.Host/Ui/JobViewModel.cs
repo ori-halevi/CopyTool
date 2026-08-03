@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Windows;
+using System.Windows.Media;
 using CopyTool.Core;
 
 namespace CopyTool.Host.Ui;
@@ -63,6 +65,12 @@ public sealed class JobViewModel : INotifyPropertyChanged
                 new PolicyOption("דלג על מוגנים", ElevationPolicy.SkipProtected),
             ], () => policies.Elevation, v => policies.Elevation = (ElevationPolicy)v, ElevationPolicy.Ask),
 
+            new PolicyChip("אימות",
+            [
+                new PolicyOption("כבוי", VerifyPolicy.Off),
+                new PolicyOption("קרא ובדוק", VerifyPolicy.EveryFile),
+            ], () => policies.Verify, v => policies.Verify = (VerifyPolicy)v, VerifyPolicy.Off),
+
             new PolicyChip("עדיפות",
             [
                 new PolicyOption("מלאה", false),
@@ -100,7 +108,6 @@ public sealed class JobViewModel : INotifyPropertyChanged
         ? ""
         : $"{Format.Bytes(_bytesDone)} / {Format.Bytes(_bytesTotal)}  ·  {Format.Bytes((long)_bytesPerSecond)}/s";
 
-    public string Stats => _finished ? _summary ?? "" : "";
 
     public string Eta
     {
@@ -115,6 +122,63 @@ public sealed class JobViewModel : INotifyPropertyChanged
             int seconds = Math.Max(1, left.Seconds);
             return seconds == 1 ? "נותרה שנייה" : $"נותרו {seconds} שניות";
         }
+    }
+
+    // --- speed graph --------------------------------------------------------
+    private const int HistoryLength = 90;             // ~18 seconds at 5 samples/sec
+    private readonly Queue<double> _rateHistory = new(HistoryLength);
+    private int _sinceLastSample;
+
+    /// <summary>
+    /// The recent throughput, as a polyline in a 100x100 box that the view
+    /// stretches to fit.
+    ///
+    /// Scaled to the highest rate seen so far rather than to an absolute ceiling:
+    /// the useful information is the shape — a copy holding steady, tailing off
+    /// on a fragmented region, or stalling — and an absolute scale would flatten
+    /// every USB transfer into a line along the bottom.
+    /// </summary>
+    public PointCollection SpeedGraph { get; private set; } = [];
+
+    /// <summary>
+    /// Shown only once there is throughput to draw.
+    ///
+    /// With every sample at zero the polyline is degenerate — every point on one
+    /// line — and a stretched-to-fill degenerate shape renders as a bar across
+    /// the middle of the box, which reads as a healthy steady copy and is the
+    /// opposite of the truth.
+    /// </summary>
+    public bool HasSpeedGraph => _rateHistory.Count >= 2 && _rateHistory.Max() > 0;
+
+    private void SampleRate()
+    {
+        // The engine reports far more often than the graph needs; one point per
+        // ~200 ms keeps the window meaningful rather than a jittering blur.
+        if (++_sinceLastSample < 2) return;
+        _sinceLastSample = 0;
+
+        _rateHistory.Enqueue(_bytesPerSecond);
+        while (_rateHistory.Count > HistoryLength) _rateHistory.Dequeue();
+
+        if (_rateHistory.Count < 2) return;
+
+        double[] rates = [.. _rateHistory];
+        double peak = rates.Max();
+        if (peak <= 0) peak = 1;
+
+        var points = new PointCollection(rates.Length);
+        for (int i = 0; i < rates.Length; i++)
+        {
+            double x = 100.0 * i / (rates.Length - 1);
+            double y = 100.0 - 100.0 * rates[i] / peak;      // y grows downwards
+            points.Add(new Point(x, y));
+        }
+
+        points.Freeze();
+        SpeedGraph = points;
+
+        Notify(nameof(SpeedGraph));
+        Notify(nameof(HasSpeedGraph));
     }
 
     public string CurrentFile => _currentFile ?? "";
@@ -246,6 +310,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
             if (seconds > 0.2) _bytesPerSecond = (p.BytesDone - firstBytes) / seconds;
         }
 
+        SampleRate();
         NotifyAll();
     }
 
@@ -270,7 +335,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
 
     private void NotifyAll()
     {
-        Notify(nameof(Percent)); Notify(nameof(Title)); Notify(nameof(Stats));
+        Notify(nameof(Percent)); Notify(nameof(Title));
         Notify(nameof(Numbers)); Notify(nameof(Eta));
         Notify(nameof(CurrentFile)); Notify(nameof(IsRunning));
         Notify(nameof(PendingText)); Notify(nameof(HasPending));

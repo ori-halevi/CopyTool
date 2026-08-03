@@ -158,14 +158,26 @@
             <TextBlock Text="  ·  " Foreground="{DynamicResource Muted}"
                        Visibility="{Binding IsRunning, Converter={StaticResource BoolToVisibility}}"/>
             <TextBlock Text="{Binding Eta}" Foreground="{DynamicResource Muted}"/>
-            <TextBlock Text="{Binding Stats}" Foreground="{DynamicResource Muted}"/>
         </StackPanel>
 
-        <StackPanel Grid.Row="3" VerticalAlignment="Center">
+        <Grid Grid.Row="3" VerticalAlignment="Center">
+            <!-- Throughput over the last few seconds. Scaled to its own peak, so
+                 the shape is the message: steady, tailing off, or stalled.
+                 FlowDirection is forced left-to-right — time runs one way. -->
+            <Border Height="44" VerticalAlignment="Center" Margin="0,4,0,8"
+                    FlowDirection="LeftToRight"
+                    Visibility="{Binding HasSpeedGraph, Converter={StaticResource BoolToVisibility}}">
+                <Polyline Points="{Binding SpeedGraph}"
+                          Stroke="{DynamicResource Accent}" StrokeThickness="1.4"
+                          StrokeLineJoin="Round" Opacity="0.85"
+                          Stretch="Fill" ClipToBounds="True"/>
+            </Border>
+
             <TextBlock Text="{Binding CurrentFile}" Foreground="{DynamicResource Muted}"
                        TextTrimming="CharacterEllipsis" FontSize="12"
+                       VerticalAlignment="Bottom"
                        FlowDirection="LeftToRight" HorizontalAlignment="Right"/>
-        </StackPanel>
+        </Grid>
 
         <!-- One row for every policy. Each chip shows its current value and opens
              its options on click; a value away from the default is accented, so a

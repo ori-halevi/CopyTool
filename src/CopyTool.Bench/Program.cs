@@ -16,7 +16,7 @@ if (args.Length < 2)
 
           profile <path>                        volume geometry and chosen defaults
           scan    <source> [...]                walk the tree, print the histogram
-          copy    <source> <destination> [--background]   run the engine
+          copy    <source> <destination> [--background] [--overwrite] [--verify]
           compare <source> <destination>        engine vs robocopy on the same input
           conflict <workdir>                    run every conflict policy over one fixture
           elevation <path>                      token state and whether <path> is writable
@@ -34,7 +34,8 @@ try
         case "profile": Profile(args[1]); break;
         case "scan":    ScanOnly(args[1..]); break;
         case "copy":
-            await Copy(args[1], args[2], args.Contains("--background"), args.Contains("--overwrite"));
+            await Copy(args[1], args[2], args.Contains("--background"),
+                       args.Contains("--overwrite"), args.Contains("--verify"));
             break;
         case "compare": await Compare(args[1], args[2]); break;
         case "conflict": await ConflictMatrix(args[1]); break;
@@ -95,12 +96,14 @@ static void ScanOnly(string[] sources)
     if (r.Inaccessible.Count > 0)         Console.WriteLine($"inaccessible      {r.Inaccessible.Count}");
 }
 
-static async Task Copy(string source, string destination, bool background = false, bool overwrite = false)
+static async Task Copy(string source, string destination, bool background = false,
+                       bool overwrite = false, bool verify = false)
 {
     ScanResult scan = Scanner.Scan([source]);
     Console.WriteLine($"{scan.FileCount:N0} files, {Bytes(scan.TotalBytes)}" +
                       (background ? "   [background I/O priority]" : "") +
-                      (overwrite ? "   [conflict=overwrite]" : ""));
+                      (overwrite ? "   [conflict=overwrite]" : "") +
+                      (verify ? "   [verify every file]" : ""));
 
     var lastLine = 0;
     var start = Stopwatch.StartNew();
@@ -113,6 +116,7 @@ static async Task Copy(string source, string destination, bool background = fals
         {
             BackgroundIo = background,
             Conflict = overwrite ? ConflictPolicy.Overwrite : ConflictPolicy.Ask,
+            Verify = verify ? VerifyPolicy.EveryFile : VerifyPolicy.Off,
         },
         Progress = new Progress<CopyProgress>(p =>
         {
@@ -335,6 +339,7 @@ static void PrintReport(CopyReport r)
     Console.WriteLine($"skipped    {r.Skipped.Count}");
     Console.WriteLine($"pending    {r.Pending.Count}");
     Console.WriteLine($"needs-elev {r.NeedsElevation.Count()}   <- permission questions, not failures");
+    if (r.Verified > 0) Console.WriteLine($"verified   {r.Verified}   read back and confirmed");
     if (r.Failures.Count > 0)
     {
         Console.WriteLine($"failures   {r.Failures.Count}");

@@ -27,6 +27,9 @@ public sealed record CopyReport
     public required int FilesCopied { get; init; }
     public required TimeSpan Elapsed { get; init; }
     public required string Strategy { get; init; }
+
+    /// <summary>Files read back and confirmed to match. Zero unless verification was on.</summary>
+    public int Verified { get; init; }
     public required IReadOnlyList<CopyFailure> Failures { get; init; }
     public required IReadOnlyList<SkippedItem> Skipped { get; init; }
 
@@ -99,6 +102,46 @@ public sealed class CopyEngine
 
     /// <summary>Marks a source as safely at the destination.</summary>
     private void MarkArrived(string source) => _arrived[source] = 0;
+
+    private int _verifiedCount;
+
+    /// <summary>
+    /// Reads a freshly copied file back and confirms it matches.
+    ///
+    /// A mismatch deletes the destination. Leaving it would be the worst possible
+    /// outcome: a file of the right name and right length holding the wrong bytes,
+    /// which every later tool — including this one, on the next run — would treat
+    /// as a good copy. And for a move it would have licensed deleting the source.
+    /// </summary>
+    private async Task<bool> VerifyArrivalAsync(ScanItem item, string dst, ConcurrentBag<CopyFailure> failures,
+                                                CancellationToken ct)
+    {
+        if (Policies.Verify == VerifyPolicy.Off) return true;
+
+        bool identical;
+        try
+        {
+            identical = await Verifier.AreIdenticalAsync(item.SourcePath, dst, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception e)
+        {
+            // Could not check. Treat that as a failure rather than quietly
+            // assuming success — the whole point was not to assume.
+            failures.Add(new CopyFailure(item.SourcePath, dst, e.Message));
+            return false;
+        }
+
+        if (identical)
+        {
+            Interlocked.Increment(ref _verifiedCount);
+            return true;
+        }
+
+        Files.TryDelete(dst);
+        failures.Add(new CopyFailure(item.SourcePath, dst, "verification failed: the copy does not match the source"));
+        return false;
+    }
 
     private ThroughputController? _controller;
 
@@ -236,6 +279,7 @@ public sealed class CopyEngine
         {
             BytesCopied = Interlocked.Read(ref _bytesDone) - Interlocked.Read(ref _bytesNotWritten),
             FilesCopied = Volatile.Read(ref _filesDone),
+            Verified = Volatile.Read(ref _verifiedCount),
             Elapsed = clock.Elapsed,
             Strategy = strategy,
             Failures = failures.ToArray(),
@@ -491,6 +535,13 @@ public sealed class CopyEngine
                 }
                 await copy.ConfigureAwait(false);
 
+                if (!await VerifyArrivalAsync(item, dst, failures, ct).ConfigureAwait(false))
+                {
+                    Interlocked.Add(ref _bytesDone, -Interlocked.Read(ref attemptBytes));
+                    AccountNotWritten(item.Size);
+                    return;
+                }
+
                 Interlocked.Increment(ref _filesDone);
                 MarkArrived(item.SourcePath);
                 return;
@@ -677,6 +728,15 @@ public sealed class CopyEngine
                 // granularity buys nothing and costs a delegate, a display class
                 // and a marshalling stub on every single file.
                 FileCopier.CopySmall(item.SourcePath, dst);
+
+                // Blocking here is deliberate: this runs on a copy worker, and the
+                // file is not finished until it has been checked.
+                if (!VerifyArrivalAsync(item, dst, failures, ct).GetAwaiter().GetResult())
+                {
+                    AccountNotWritten(item.Size);
+                    return;
+                }
+
                 Interlocked.Add(ref _bytesDone, item.Size);
                 Interlocked.Increment(ref _filesDone);
                 MarkArrived(item.SourcePath);
