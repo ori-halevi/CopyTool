@@ -26,6 +26,7 @@ when you come back**.
 | Not enough space | discovered at 90% | refuses to start, and says by how much |
 | Identical files | copied again | skipped — and never silently |
 | Same-volume move | copy then delete | **rename: instant, any size** |
+| Three drops in a row | three windows stacking up | one window, one list — same disk in turn, different disks at once |
 
 ## Speed
 
@@ -147,7 +148,7 @@ file is the only way to see what it did.
 dotnet test tests\CopyTool.Tests
 ```
 
-42 tests over the real filesystem — the engine is almost entirely about what the
+61 tests over the real filesystem — the engine is almost entirely about what the
 filesystem actually does, so an abstraction would only agree with whatever the
 engine already believes.
 
@@ -159,8 +160,9 @@ Reintroducing that bug fails five of these tests and no others.
 
 ## Status
 
-Working: shell integration, copy engine, progress UI, pause/resume/cancel, conflict
-policies and dialog, elevation, preflight, install/uninstall.
+Working: shell integration, copy engine, progress UI, the multi-job queue,
+pause/resume/cancel, conflict policies and dialog, elevation, preflight,
+install/uninstall.
 
 Known gaps are tracked in [docs/PLAN.md](docs/PLAN.md) §8 and §9.
 

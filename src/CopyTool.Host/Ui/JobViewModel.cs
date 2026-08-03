@@ -6,6 +6,8 @@ using CopyTool.Core;
 
 namespace CopyTool.Host.Ui;
 
+public enum JobStatus { Queued, Running, Finished }
+
 /// <summary>
 /// What the progress window shows for one job.
 ///
@@ -81,6 +83,42 @@ public sealed class JobViewModel : INotifyPropertyChanged
 
     public string Operation { get; }
     public string Destination { get; }
+
+    // --- place in the queue -------------------------------------------------
+    private JobStatus _status = JobStatus.Queued;
+    private bool _isPrimary;
+
+    public JobStatus Status
+    {
+        get => _status;
+        set
+        {
+            if (_status == value) return;
+            _status = value;
+            Notify();
+            Notify(nameof(StatusText));
+            Notify(nameof(IsQueued));
+        }
+    }
+
+    /// <summary>True for the one job shown in full; the rest are single rows.</summary>
+    public bool IsPrimary
+    {
+        get => _isPrimary;
+        set { if (_isPrimary != value) { _isPrimary = value; Notify(); } }
+    }
+
+    public bool IsQueued => _status == JobStatus.Queued;
+
+    public string StatusText => _status switch
+    {
+        JobStatus.Queued => "ממתין בתור",
+        JobStatus.Running => Numbers,
+        _ => _summary ?? "הושלם",
+    };
+
+    /// <summary>One line for the queue list: what, and where to.</summary>
+    public string ShortTitle => $"{Operation} ← {System.IO.Path.GetFileName(Destination.TrimEnd('\\'))}";
     public JobPolicies Policies { get; }
     public IReadOnlyList<PolicyChip> Chips { get; }
 
@@ -224,6 +262,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
         _blockedReason = reason;
         _finished = true;
         _summary = reason;
+        Status = JobStatus.Finished;
         NotifyAll();
         Notify(nameof(IsBlocked));
         Notify(nameof(BlockedText));
@@ -325,8 +364,10 @@ public sealed class JobViewModel : INotifyPropertyChanged
             ? $"בוטל — {report.FilesCopied:N0} מתוך {_filesTotal:N0} הועתקו"
             : report.Failures.Count > 0
                 ? $"הושלם עם {report.Failures.Count} שגיאות — {Format.Bytes(report.BytesCopied)} ב-{seconds}"
-                : $"הושלם — {report.FilesCopied:N0} פריטים, {Format.Bytes(report.BytesCopied)} ב-{seconds}";
+                : $"הושלם — {report.FilesCopied:N0} פריטים, {Format.Bytes(report.BytesCopied)} ב-{seconds}"
+                  + (report.Verified > 0 ? $", {report.Verified:N0} אומתו" : "");
 
+        Status = JobStatus.Finished;
         NotifyAll();
     }
 
@@ -340,6 +381,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
         Notify(nameof(CurrentFile)); Notify(nameof(IsRunning));
         Notify(nameof(PendingText)); Notify(nameof(HasPending));
         Notify(nameof(SkippedText)); Notify(nameof(HasSkipped));
+        Notify(nameof(StatusText));
         NotifyElevation();
     }
 

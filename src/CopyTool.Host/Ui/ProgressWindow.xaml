@@ -101,132 +101,176 @@
 
     <Grid Margin="24,20,24,18">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>   <!-- title -->
-            <RowDefinition Height="Auto"/>   <!-- bar -->
-            <RowDefinition Height="Auto"/>   <!-- stats -->
-            <RowDefinition Height="*"/>      <!-- current file -->
-            <RowDefinition Height="Auto"/>   <!-- policy chips -->
-            <RowDefinition Height="Auto"/>   <!-- actions + counters -->
+            <RowDefinition Height="Auto"/>   <!-- queue list -->
+            <RowDefinition Height="*"/>      <!-- the job shown in full -->
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="0,0,0,14">
-            <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold"
-                       TextTrimming="CharacterEllipsis"/>
-
-            <!-- Blocking preflight result: nothing was copied, and the reason is
-                 stated instead of a job that silently did nothing. -->
-            <Border Margin="0,10,0,0" Padding="12,8" CornerRadius="6"
-                    Background="#22FF6B6B" BorderBrush="#FFFF6B6B" BorderThickness="1"
-                    Visibility="{Binding IsBlocked, Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text="{Binding BlockedText}" Foreground="#FFFF9A9A" TextWrapping="Wrap"/>
-            </Border>
-
-            <!-- Non-fatal findings, stated once up front. -->
-            <Border Margin="0,10,0,0" Padding="12,8" CornerRadius="6"
-                    Background="#18FFC83D" BorderBrush="#66FFC83D" BorderThickness="1"
-                    Visibility="{Binding HasWarnings, Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text="{Binding WarningsText}" Foreground="{DynamicResource Warning}"
-                           TextWrapping="Wrap" FontSize="12"/>
-            </Border>
-
-            <!-- Appears the moment the preflight knows, not after the copy stalls.
-                 Everything unaffected keeps copying while this is on screen. -->
-            <Border Margin="0,10,0,0" Padding="12,8" CornerRadius="6"
-                    Background="#22FFC83D" BorderBrush="{DynamicResource Warning}" BorderThickness="1"
-                    Visibility="{Binding ShowElevationBanner, Converter={StaticResource BoolToVisibility}}">
-                <DockPanel LastChildFill="True">
-                    <Button DockPanel.Dock="Left" Style="{StaticResource PolicyChipStyle}"
-                            Content="אשר עכשיו" Click="OnElevateClick" Margin="10,0,0,0"
-                            IsEnabled="{Binding CanRequestElevation}"
-                            Foreground="{DynamicResource Warning}"
-                            BorderBrush="{DynamicResource Warning}"/>
-                    <TextBlock Text="{Binding ElevationText}" VerticalAlignment="Center"
-                               Foreground="{DynamicResource Warning}"
-                               TextWrapping="Wrap"/>
-                </DockPanel>
+        <!-- Every other job, one line each. Appears only when there is more than
+             one, so a single drop looks exactly as it did before. -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,14"
+                    Visibility="{Binding Queue.ShowList, Converter={StaticResource BoolToVisibility}}">
+            <TextBlock Text="{Binding Queue.Header}" Foreground="{DynamicResource Muted}"
+                       FontSize="12" Margin="0,0,0,6"/>
+            <Border BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="6"
+                    MaxHeight="120">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <ItemsControl ItemsSource="{Binding Queue.Jobs}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="10,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="{Binding ShortTitle}" FontSize="12"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <ProgressBar Style="{StaticResource Bar}" Height="3" Margin="0,4,0,0"
+                                                     Minimum="0" Maximum="100"
+                                                     Value="{Binding Percent, Mode=OneWay}"/>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" Text="{Binding StatusText}" FontSize="11"
+                                               Foreground="{DynamicResource Muted}"
+                                               VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
             </Border>
         </StackPanel>
 
-        <ProgressBar Grid.Row="1" Style="{StaticResource Bar}"
-                     Minimum="0" Maximum="100" Value="{Binding Percent, Mode=OneWay}"/>
+        <!-- Everything below is one job's detail. Bound once here rather than per
+             element, so handing the area to a different job is a single change. -->
+        <Grid Grid.Row="1" DataContext="{Binding Queue.Primary}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>   <!-- title and banners -->
+                <RowDefinition Height="Auto"/>   <!-- bar -->
+                <RowDefinition Height="Auto"/>   <!-- stats -->
+                <RowDefinition Height="*"/>      <!-- graph + current file -->
+                <RowDefinition Height="Auto"/>   <!-- policy chips -->
+                <RowDefinition Height="Auto"/>   <!-- actions + counters -->
+            </Grid.RowDefinitions>
 
-        <!-- Numbers and the Hebrew ETA are separate elements: put them in one string
-             and bidi reordering shuffles the Latin runs. -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
-            <TextBlock Text="{Binding Numbers}" Foreground="{DynamicResource Muted}"
-                       FlowDirection="LeftToRight"/>
-            <TextBlock Text="  ·  " Foreground="{DynamicResource Muted}"
-                       Visibility="{Binding IsRunning, Converter={StaticResource BoolToVisibility}}"/>
-            <TextBlock Text="{Binding Eta}" Foreground="{DynamicResource Muted}"/>
-        </StackPanel>
+            <StackPanel Grid.Row="0" Margin="0,0,0,14">
+                <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold"
+                           TextTrimming="CharacterEllipsis"/>
 
-        <Grid Grid.Row="3" VerticalAlignment="Center">
-            <!-- Throughput over the last few seconds. Scaled to its own peak, so
-                 the shape is the message: steady, tailing off, or stalled.
-                 FlowDirection is forced left-to-right — time runs one way. -->
-            <Border Height="44" VerticalAlignment="Center" Margin="0,4,0,8"
-                    FlowDirection="LeftToRight"
-                    Visibility="{Binding HasSpeedGraph, Converter={StaticResource BoolToVisibility}}">
-                <Polyline Points="{Binding SpeedGraph}"
-                          Stroke="{DynamicResource Accent}" StrokeThickness="1.4"
-                          StrokeLineJoin="Round" Opacity="0.85"
-                          Stretch="Fill" ClipToBounds="True"/>
-            </Border>
+                <!-- Blocking preflight result: nothing was copied, and the reason is
+                     stated instead of a job that silently did nothing. -->
+                <Border Margin="0,10,0,0" Padding="12,8" CornerRadius="6"
+                        Background="#22FF6B6B" BorderBrush="#FFFF6B6B" BorderThickness="1"
+                        Visibility="{Binding IsBlocked, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="{Binding BlockedText}" Foreground="#FFFF9A9A" TextWrapping="Wrap"/>
+                </Border>
 
-            <TextBlock Text="{Binding CurrentFile}" Foreground="{DynamicResource Muted}"
-                       TextTrimming="CharacterEllipsis" FontSize="12"
-                       VerticalAlignment="Bottom"
-                       FlowDirection="LeftToRight" HorizontalAlignment="Right"/>
-        </Grid>
+                <!-- Non-fatal findings, stated once up front. -->
+                <Border Margin="0,10,0,0" Padding="12,8" CornerRadius="6"
+                        Background="#18FFC83D" BorderBrush="#66FFC83D" BorderThickness="1"
+                        Visibility="{Binding HasWarnings, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="{Binding WarningsText}" Foreground="{DynamicResource Warning}"
+                               TextWrapping="Wrap" FontSize="12"/>
+                </Border>
 
-        <!-- One row for every policy. Each chip shows its current value and opens
-             its options on click; a value away from the default is accented, so a
-             changed policy is visible without reading. -->
-        <ItemsControl Grid.Row="4" ItemsSource="{Binding Chips}" Margin="0,0,0,12">
-            <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate>
-                    <WrapPanel Orientation="Horizontal"/>
-                </ItemsPanelTemplate>
-            </ItemsControl.ItemsPanel>
-            <ItemsControl.ItemTemplate>
-                <DataTemplate>
-                    <!-- The visual content is a panel, which leaves the button
-                         nameless to assistive tech; state it explicitly. -->
-                    <Button Style="{StaticResource PolicyChipStyle}" Click="OnChipClick"
-                            Tag="{Binding}"
-                            AutomationProperties.Name="{Binding Text}"
-                            ToolTip="{Binding Text}">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="{Binding Text}"/>
-                            <TextBlock Text=" ⌄" Opacity="0.6"/>
-                        </StackPanel>
-                    </Button>
-                </DataTemplate>
-            </ItemsControl.ItemTemplate>
-        </ItemsControl>
-
-        <!-- Counters sit next to the actions and appear only when they have
-             something to say. A skip is never silent. -->
-        <Grid Grid.Row="5">
-            <StackPanel Orientation="Horizontal">
-                <Button x:Name="PauseButton" Style="{StaticResource Chip}"
-                        Content="{Binding PauseLabel}" Click="OnPauseClick"
-                        IsEnabled="{Binding IsRunning}"/>
-                <Button x:Name="CancelButton" Style="{StaticResource Chip}"
-                        Content="בטל" Click="OnCancelClick"
-                        IsEnabled="{Binding IsRunning}"/>
-                <Button x:Name="CloseButton" Style="{StaticResource Chip}"
-                        Content="סגור" Click="OnCloseClick"/>
+                <!-- Appears the moment the preflight knows, not after the copy stalls.
+                     Everything unaffected keeps copying while this is on screen. -->
+                <Border Margin="0,10,0,0" Padding="12,8" CornerRadius="6"
+                        Background="#22FFC83D" BorderBrush="{DynamicResource Warning}" BorderThickness="1"
+                        Visibility="{Binding ShowElevationBanner, Converter={StaticResource BoolToVisibility}}">
+                    <DockPanel LastChildFill="True">
+                        <Button DockPanel.Dock="Left" Style="{StaticResource PolicyChipStyle}"
+                                Content="אשר עכשיו" Click="OnElevateClick" Margin="10,0,0,0"
+                                IsEnabled="{Binding CanRequestElevation}"
+                                Foreground="{DynamicResource Warning}"
+                                BorderBrush="{DynamicResource Warning}"/>
+                        <TextBlock Text="{Binding ElevationText}" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource Warning}"
+                                   TextWrapping="Wrap"/>
+                    </DockPanel>
+                </Border>
             </StackPanel>
 
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
-                <TextBlock Text="{Binding PendingText}" Foreground="{DynamicResource Warning}"
-                           Margin="0,0,14,0" VerticalAlignment="Center"
-                           Visibility="{Binding HasPending, Converter={StaticResource BoolToVisibility}}"/>
-                <TextBlock Text="{Binding SkippedText}" Foreground="{DynamicResource Muted}"
-                           VerticalAlignment="Center"
-                           Visibility="{Binding HasSkipped, Converter={StaticResource BoolToVisibility}}"/>
+            <ProgressBar Grid.Row="1" Style="{StaticResource Bar}"
+                         Minimum="0" Maximum="100" Value="{Binding Percent, Mode=OneWay}"/>
+
+            <!-- Numbers and the Hebrew ETA are separate elements: put them in one string
+                 and bidi reordering shuffles the Latin runs. -->
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
+                <TextBlock Text="{Binding Numbers}" Foreground="{DynamicResource Muted}"
+                           FlowDirection="LeftToRight"/>
+                <TextBlock Text="  ·  " Foreground="{DynamicResource Muted}"
+                           Visibility="{Binding IsRunning, Converter={StaticResource BoolToVisibility}}"/>
+                <TextBlock Text="{Binding Eta}" Foreground="{DynamicResource Muted}"/>
             </StackPanel>
+
+            <Grid Grid.Row="3" VerticalAlignment="Center">
+                <!-- Throughput over the last few seconds. Scaled to its own peak, so
+                     the shape is the message: steady, tailing off, or stalled.
+                     FlowDirection is forced left-to-right — time runs one way. -->
+                <Border Height="44" VerticalAlignment="Center" Margin="0,4,0,8"
+                        FlowDirection="LeftToRight"
+                        Visibility="{Binding HasSpeedGraph, Converter={StaticResource BoolToVisibility}}">
+                    <Polyline Points="{Binding SpeedGraph}"
+                              Stroke="{DynamicResource Accent}" StrokeThickness="1.4"
+                              StrokeLineJoin="Round" Opacity="0.85"
+                              Stretch="Fill" ClipToBounds="True"/>
+                </Border>
+
+                <TextBlock Text="{Binding CurrentFile}" Foreground="{DynamicResource Muted}"
+                           TextTrimming="CharacterEllipsis" FontSize="12"
+                           VerticalAlignment="Bottom"
+                           FlowDirection="LeftToRight" HorizontalAlignment="Right"/>
+            </Grid>
+
+            <!-- One row for every policy. Each chip shows its current value and opens
+                 its options on click; a value away from the default is accented, so a
+                 changed policy is visible without reading. -->
+            <ItemsControl Grid.Row="4" ItemsSource="{Binding Chips}" Margin="0,0,0,12">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <!-- The visual content is a panel, which leaves the button
+                             nameless to assistive tech; state it explicitly. -->
+                        <Button Style="{StaticResource PolicyChipStyle}" Click="OnChipClick"
+                                Tag="{Binding}"
+                                AutomationProperties.Name="{Binding Text}"
+                                ToolTip="{Binding Text}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Text}"/>
+                                <TextBlock Text=" ⌄" Opacity="0.6"/>
+                            </StackPanel>
+                        </Button>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- Counters sit next to the actions and appear only when they have
+                 something to say. A skip is never silent. -->
+            <Grid Grid.Row="5">
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="PauseButton" Style="{StaticResource Chip}"
+                            Content="{Binding PauseLabel}" Click="OnPauseClick"
+                            IsEnabled="{Binding IsRunning}"/>
+                    <Button x:Name="CancelButton" Style="{StaticResource Chip}"
+                            Content="בטל" Click="OnCancelClick"
+                            IsEnabled="{Binding IsRunning}"/>
+                    <Button x:Name="CloseButton" Style="{StaticResource Chip}"
+                            Content="סגור" Click="OnCloseClick"/>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding PendingText}" Foreground="{DynamicResource Warning}"
+                               Margin="0,0,14,0" VerticalAlignment="Center"
+                               Visibility="{Binding HasPending, Converter={StaticResource BoolToVisibility}}"/>
+                    <TextBlock Text="{Binding SkippedText}" Foreground="{DynamicResource Muted}"
+                               VerticalAlignment="Center"
+                               Visibility="{Binding HasSkipped, Converter={StaticResource BoolToVisibility}}"/>
+                </StackPanel>
+            </Grid>
         </Grid>
     </Grid>
 </Window>

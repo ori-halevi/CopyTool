@@ -25,6 +25,26 @@ internal sealed class App : Application
         Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _shutdown = new();
 
+    /// <summary>One window for everything, created on the first job.</summary>
+    private readonly QueueViewModel _queue = new();
+    private ProgressWindow? _window;
+
+    /// <summary>
+    /// The tail of each destination volume's chain of jobs.
+    ///
+    /// Two copies onto the same disk do not go twice as fast — they interleave and
+    /// both finish later, and on a spinning disk they finish much later. Jobs onto
+    /// the same volume therefore run one after another, while jobs onto different
+    /// volumes run at the same time, which is exactly where the parallelism pays.
+    /// </summary>
+    private readonly Dictionary<string, Task> _chains = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Modal dialogs, one at a time — two jobs can finish together.</summary>
+    private readonly SemaphoreSlim _dialogGate = new(1, 1);
+
+    private int _running;
+    private DateTime _lastActivityUtc = DateTime.UtcNow;
+
     public App(string? initialJob, TimeSpan idleTimeout)
     {
         _initialJob = initialJob;
@@ -58,7 +78,13 @@ internal sealed class App : Application
         _ = PumpAsync();
     }
 
-    /// <summary>Runs queued jobs, then exits once the idle window elapses.</summary>
+    /// <summary>
+    /// Accepts jobs and hands them to the scheduler, then exits once nothing has
+    /// arrived and nothing is running for the whole idle window.
+    ///
+    /// The pump no longer runs the jobs itself: it would serialise every drop
+    /// behind every other one, including drops onto a completely different disk.
+    /// </summary>
     private async Task PumpAsync()
     {
         try
@@ -74,6 +100,13 @@ internal sealed class App : Application
                 }
                 catch (OperationCanceledException)
                 {
+                    if (_shutdown.IsCancellationRequested) break;
+
+                    // A long copy is not an idle host, and neither is the minute
+                    // after one finished while its window is still on screen.
+                    if (Volatile.Read(ref _running) > 0) continue;
+                    if (DateTime.UtcNow - _lastActivityUtc < _idleTimeout) continue;
+
                     string window = _idleTimeout.TotalMinutes >= 1
                         ? $"{_idleTimeout.TotalMinutes:F0} min"
                         : $"{_idleTimeout.TotalSeconds:F0} s";
@@ -81,20 +114,8 @@ internal sealed class App : Application
                     break;
                 }
 
-                await RunJobAsync(path);
-
-                if (!_jobs.Reader.TryPeek(out _))
-                {
-                    try
-                    {
-                        Ghost.TrimWorkingSet();
-                        HostLog.Write($"idle; working set {Ghost.WorkingSetBytes / 1024.0 / 1024:F1} MB");
-                    }
-                    catch (Exception e)
-                    {
-                        HostLog.Write($"working-set trim failed (ignored): {e.Message}");
-                    }
-                }
+                _lastActivityUtc = DateTime.UtcNow;
+                Schedule(path);
             }
         }
         catch (Exception e)
@@ -109,7 +130,15 @@ internal sealed class App : Application
         }
     }
 
-    private async Task RunJobAsync(string jobFilePath)
+    /// <summary>
+    /// Puts a job on screen straight away and queues the work behind whatever else
+    /// is already going to the same volume.
+    ///
+    /// Everything here runs on the UI thread — the pump's continuations come back
+    /// to the dispatcher — so the window, the queue and <see cref="_chains"/> need
+    /// no locking.
+    /// </summary>
+    private void Schedule(string jobFilePath)
     {
         JobSpec? job = JobSpec.TryLoad(jobFilePath, out string error);
         if (job is null)
@@ -122,16 +151,101 @@ internal sealed class App : Application
             ? CopyOperation.Move
             : CopyOperation.Copy;
 
-        HostLog.Write($"job {job.Id}: {operation} {job.Sources.Length} source(s) -> {job.Destination}");
-
-        using var control = new JobControl();
+        var control = new JobControl();
         var policies = new JobPolicies();
         var vm = new JobViewModel(
             operation == CopyOperation.Move ? "מעביר" : "מעתיק",
             job.Destination, control, policies);
 
-        var window = new ProgressWindow(vm);
-        window.Show();
+        ShowQueue();
+        _queue.Add(vm);
+
+        string volume = VolumeKey(job.Destination);
+        Task previous = _chains.TryGetValue(volume, out Task? tail) ? tail : Task.CompletedTask;
+
+        Interlocked.Increment(ref _running);
+        _chains[volume] = RunChainedAsync(previous, jobFilePath, job, operation, control, policies, vm);
+    }
+
+    /// <summary>The volume a path lands on: two jobs sharing one must not overlap.</summary>
+    private static string VolumeKey(string destination)
+    {
+        try
+        {
+            string? root = Path.GetPathRoot(Path.GetFullPath(destination));
+            if (!string.IsNullOrEmpty(root)) return root;
+        }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            // An unparseable destination gets its own chain; preflight will reject
+            // it in a moment anyway.
+        }
+        return destination;
+    }
+
+    private async Task RunChainedAsync(
+        Task previous, string jobFilePath, JobSpec job, CopyOperation operation,
+        JobControl control, JobPolicies policies, JobViewModel vm)
+    {
+        try
+        {
+            await previous;                       // never faults: RunJobAsync swallows
+            vm.Status = JobStatus.Running;
+            await RunJobAsync(jobFilePath, job, operation, control, policies, vm);
+        }
+        catch (Exception e)
+        {
+            HostLog.Write($"  job {job.Id} threw in chain: {e}");
+        }
+        finally
+        {
+            control.Dispose();
+
+            if (Interlocked.Decrement(ref _running) == 0)
+            {
+                _lastActivityUtc = DateTime.UtcNow;
+                _chains.Clear();                  // nothing running: no tail worth keeping
+
+                try
+                {
+                    Ghost.TrimWorkingSet();
+                    HostLog.Write($"idle; working set {Ghost.WorkingSetBytes / 1024.0 / 1024:F1} MB");
+                }
+                catch (Exception e)
+                {
+                    HostLog.Write($"working-set trim failed (ignored): {e.Message}");
+                }
+            }
+        }
+    }
+
+    /// <summary>Creates the one window on first use, or brings it back into view.</summary>
+    private void ShowQueue()
+    {
+        if (_window is null)
+        {
+            _window = new ProgressWindow(_queue);
+
+            // Closing the window is how a finished job is dismissed — including a
+            // failed one, whose row was the only record of it. Anything still
+            // running stays: closing has never meant cancelling.
+            _window.Closed += (_, _) =>
+            {
+                _window = null;
+                foreach (JobViewModel done in _queue.Jobs.Where(j => j.Status == JobStatus.Finished).ToArray())
+                    _queue.Remove(done);
+            };
+        }
+
+        _window.Show();
+        if (_window.WindowState == WindowState.Minimized) _window.WindowState = WindowState.Normal;
+    }
+
+    private async Task RunJobAsync(
+        string jobFilePath, JobSpec job, CopyOperation operation,
+        JobControl control, JobPolicies policies, JobViewModel vm)
+    {
+        HostLog.Write($"job {job.Id}: {operation} {job.Sources.Length} source(s) -> {job.Destination}");
 
         try
         {
@@ -210,8 +324,8 @@ internal sealed class App : Application
 
             vm.Finish(report, cancelled: control.IsCancelled);
 
-            CopyReport? resolved = await ResolveConflictsAsync(report, engine, vm, control, window);
-            bool elevationResolved = await ResolveElevationAsync(elevation, vm, policies, control, window);
+            CopyReport? resolved = await ResolveConflictsAsync(report, engine, vm, control);
+            bool elevationResolved = await ResolveElevationAsync(elevation, vm, policies, control);
 
             if (elevation.Copied > 0 || elevation.Failed > 0)
                 HostLog.Write($"  elevated: {elevation.Copied:N0} copied, {elevation.Failed:N0} failed");
@@ -231,18 +345,30 @@ internal sealed class App : Application
             if (report.Failures.Count == 0 && !control.IsCancelled && elevationResolved)
             {
                 TryDelete(jobFilePath);
-                window.Close();
+                Retire(vm);
             }
         }
         catch (OperationCanceledException)
         {
             HostLog.Write($"  job {job.Id} cancelled");
-            window.Close();
+            Retire(vm);
         }
         catch (Exception e)
         {
             HostLog.Write($"  job {job.Id} threw: {e}");
         }
+    }
+
+    /// <summary>
+    /// Takes a finished job off the list, and closes the window once the last one
+    /// goes — which is what a single successful drop looked like before there was
+    /// a queue at all. A job that failed, was blocked or has something left to
+    /// answer is never retired: its row is the only record the user gets.
+    /// </summary>
+    private void Retire(JobViewModel vm)
+    {
+        _queue.Remove(vm);
+        if (_queue.Jobs.Count == 0) _window?.Close();
     }
 
     /// <summary>
@@ -258,17 +384,34 @@ internal sealed class App : Application
     /// This runs after the copy, never during it — the whole reason those items
     /// were parked is that a question must not hold up the other 99%.
     /// </summary>
-    private static async Task<CopyReport?> ResolveConflictsAsync(
-        CopyReport report, CopyEngine engine, JobViewModel vm, JobControl control, ProgressWindow window)
+    private async Task<CopyReport?> ResolveConflictsAsync(
+        CopyReport report, CopyEngine engine, JobViewModel vm, JobControl control)
     {
         // Permission items are answered by a UAC prompt, not by this dialog.
         var answerable = report.NeedsAnswer.ToArray();
         if (answerable.Length == 0 || control.IsCancelled) return null;
 
-        var vmConflicts = new ConflictViewModel(answerable);
-        var dialog = new ConflictWindow(vmConflicts) { Owner = window.IsLoaded ? window : null };
+        // Two jobs on different disks can finish within the same second; stacked
+        // modal dialogs are how a user ends up answering the wrong one's questions.
+        await _dialogGate.WaitAsync(control.Token);
+        bool? answer;
+        List<(string Source, string Destination, long Size)>? list;
+        try
+        {
+            var vmConflicts = new ConflictViewModel(answerable);
+            var dialog = new ConflictWindow(vmConflicts)
+            {
+                Owner = _window is { IsLoaded: true } w ? w : null,
+            };
+            answer = dialog.ShowDialog();
+            list = dialog.Result;
+        }
+        finally
+        {
+            _dialogGate.Release();
+        }
 
-        if (dialog.ShowDialog() != true || dialog.Result is not { Count: > 0 } list)
+        if (answer != true || list is not { Count: > 0 })
         {
             HostLog.Write($"  conflicts: {answerable.Length} left unresolved");
             return null;
@@ -297,9 +440,9 @@ internal sealed class App : Application
     /// has consented yet — and then the window simply waits for the button, or for
     /// the user to close it, which is the other valid answer.
     /// </summary>
-    private static async Task<bool> ResolveElevationAsync(
+    private async Task<bool> ResolveElevationAsync(
         ElevationCoordinator elevation, JobViewModel vm, JobPolicies policies,
-        JobControl control, ProgressWindow window)
+        JobControl control)
     {
         if (await elevation.FinishAsync(control.Token).ConfigureAwait(false)) return true;
         if (control.IsCancelled) return false;
@@ -317,6 +460,12 @@ internal sealed class App : Application
             else
                 decided.TrySetResult(false);
         }
+
+        // Closing the window is the other valid answer to "may I elevate?" — but
+        // only the window this job is actually shown in, so a job scheduled after
+        // it reopens one does not inherit a stale subscription.
+        ProgressWindow? window = _window;
+        if (window is null) return false;
 
         window.Closed += OnClosed;
         vm.ElevationRequested += OnRequested;
