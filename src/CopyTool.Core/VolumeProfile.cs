@@ -27,7 +27,6 @@ public sealed record VolumeProfile
     public required int     ClusterSize   { get; init; }
     public required MediaKind Media       { get; init; }
     public required StorageBusType Bus    { get; init; }
-    public required long    FreeBytes     { get; init; }
 
     /// <summary>Files at or above this size go down the unbuffered pipeline.</summary>
     public long LargeFileThreshold => Media switch
@@ -98,7 +97,7 @@ public sealed record VolumeProfile
     public bool SupportsBlockCloning => FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase);
 
     public override string ToString() =>
-        $"{Root} {FileSystem} {Media}/{Bus} sector={BytesPerSector} cluster={ClusterSize} free={FreeBytes / (1024.0 * 1024 * 1024):F1} GB";
+        $"{Root} {FileSystem} {Media}/{Bus} sector={BytesPerSector} cluster={ClusterSize}";
 }
 
 public static class VolumeProfiler
@@ -111,11 +110,51 @@ public static class VolumeProfiler
     // repeated lookups for files in one job cost a dictionary hit and nothing else.
     private static readonly ConcurrentDictionary<string, string> RootCache = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// How many paths the root cache keeps before it is thrown away and rebuilt.
+    ///
+    /// The key is a full path and a job hands us one per file, so unbounded this
+    /// grew for the entire life of the host process: a 200,000-file move retained
+    /// 200,000 strings that no collection could reclaim, and a process advertising
+    /// a 0.4 MB idle footprint stopped having one. Dropping the whole cache on
+    /// overflow rather than evicting entries keeps this to one comparison per
+    /// miss — it is a cache, and rebuilding it costs a syscall per path.
+    /// </summary>
+    private const int RootCacheLimit = 4096;
+    private static int _rootCacheEntries;
+
     /// <summary>Profile of the volume that holds <paramref name="path"/>.</summary>
     public static VolumeProfile ForPath(string path)
     {
-        string root = RootCache.GetOrAdd(path, GetVolumeRoot);
+        string root = RootCache.GetOrAdd(path, ResolveRoot);
         return Cache.GetOrAdd(root, Probe);
+    }
+
+    private static string ResolveRoot(string path)
+    {
+        if (Interlocked.Increment(ref _rootCacheEntries) > RootCacheLimit)
+        {
+            RootCache.Clear();
+            Volatile.Write(ref _rootCacheEntries, 1);
+        }
+
+        return GetVolumeRoot(path);
+    }
+
+    /// <summary>
+    /// Free space on the volume holding <paramref name="path"/>, right now.
+    ///
+    /// Deliberately not part of <see cref="VolumeProfile"/>: that is cached for
+    /// the life of the process because geometry does not change, and free space
+    /// does — constantly, including because of the copy this call is about to
+    /// authorise. Cached, it meant a second job onto the same disk was measured
+    /// against the space that existed before the first one ran, and that space
+    /// freed after a "not enough room" refusal was never noticed.
+    /// </summary>
+    public static long FreeBytes(string path)
+    {
+        string root = RootCache.GetOrAdd(path, ResolveRoot);
+        return Win32.GetDiskFreeSpaceEx(root, out ulong available, out _, out _) ? (long)available : 0;
     }
 
     /// <summary>True when both paths sit on the same volume — the rename fast path for moves.</summary>
@@ -155,10 +194,6 @@ public static class VolumeProfiler
             clusterSize    = (int)(spc * bps);
         }
 
-        long free = 0;
-        if (Win32.GetDiskFreeSpaceEx(root, out ulong freeAvail, out _, out _))
-            free = (long)freeAvail;
-
         string fs = "Unknown";
         var driveKind = DriveType.Unknown;
         try
@@ -180,7 +215,7 @@ public static class VolumeProfiler
         {
             Root = root, Id = id, FileSystem = fs,
             BytesPerSector = bytesPerSector, ClusterSize = clusterSize,
-            Media = media, Bus = bus, FreeBytes = free,
+            Media = media, Bus = bus,
         };
     }
 

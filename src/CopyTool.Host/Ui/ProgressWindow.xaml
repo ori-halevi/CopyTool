@@ -96,6 +96,14 @@
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+            <!-- Paused reads as a colour before it reads as a word, which is why
+                 the built-in copy dialog does the same. On the shared style, so the
+                 queue rows say it too and not only the job shown in full. -->
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsPaused}" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource Warning}"/>
+                </DataTrigger>
+            </Style.Triggers>
         </Style>
     </Window.Resources>
 
@@ -111,32 +119,71 @@
                     Visibility="{Binding Queue.ShowList, Converter={StaticResource BoolToVisibility}}">
             <TextBlock Text="{Binding Queue.Header}" Foreground="{DynamicResource Muted}"
                        FontSize="12" Margin="0,0,0,6"/>
-            <Border BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="6"
-                    MaxHeight="120">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <ItemsControl ItemsSource="{Binding Queue.Jobs}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Margin="10,6">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    <StackPanel Grid.Column="0">
-                                        <TextBlock Text="{Binding ShortTitle}" FontSize="12"
-                                                   TextTrimming="CharacterEllipsis"/>
-                                        <ProgressBar Style="{StaticResource Bar}" Height="3" Margin="0,4,0,0"
-                                                     Minimum="0" Maximum="100"
-                                                     Value="{Binding Percent, Mode=OneWay}"/>
-                                    </StackPanel>
-                                    <TextBlock Grid.Column="1" Text="{Binding StatusText}" FontSize="11"
-                                               Foreground="{DynamicResource Muted}"
-                                               VerticalAlignment="Center" Margin="10,0,0,0"/>
-                                </Grid>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
+            <!-- A ListBox rather than an ItemsControl: the rows have to be
+                 selectable. Selecting one brings it into the detail area below and
+                 the pause and cancel buttons act on it, which is the only way to
+                 cancel a job waiting its turn without cancelling the one that is
+                 running. Selection also brings arrow-key navigation with it. -->
+            <Border BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="6">
+                <ListBox ItemsSource="{Binding Queue.Jobs}"
+                         SelectedItem="{Binding Queue.Primary, Mode=TwoWay}"
+                         MaxHeight="120"
+                         Background="Transparent" BorderThickness="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         HorizontalContentAlignment="Stretch">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Padding" Value="0"/>
+                            <Setter Property="Cursor" Value="Hand"/>
+                            <Setter Property="AutomationProperties.Name" Value="{Binding ShortTitle}"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <!-- The accent edge sits on the flow-start
+                                             side, which under RightToLeft is the
+                                             visual right. -->
+                                        <Border x:Name="Row" CornerRadius="4"
+                                                Background="Transparent"
+                                                BorderBrush="Transparent" BorderThickness="2,0,0,0">
+                                            <ContentPresenter/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="#14FFFFFF"/>
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter TargetName="Row" Property="Background"
+                                                        Value="{DynamicResource SurfaceAlt}"/>
+                                                <Setter TargetName="Row" Property="BorderBrush"
+                                                        Value="{DynamicResource Accent}"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="10,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="{Binding ShortTitle}" FontSize="12"
+                                               TextTrimming="CharacterEllipsis"/>
+                                    <ProgressBar Style="{StaticResource Bar}" Height="3" Margin="0,4,0,0"
+                                                 Minimum="0" Maximum="100"
+                                                 Value="{Binding Percent, Mode=OneWay}"/>
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" Text="{Binding StatusText}" FontSize="11"
+                                           Foreground="{DynamicResource Muted}"
+                                           VerticalAlignment="Center" Margin="10,0,0,0"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
             </Border>
         </StackPanel>
 
@@ -169,6 +216,16 @@
                         Background="#18FFC83D" BorderBrush="#66FFC83D" BorderThickness="1"
                         Visibility="{Binding HasWarnings, Converter={StaticResource BoolToVisibility}}">
                     <TextBlock Text="{Binding WarningsText}" Foreground="{DynamicResource Warning}"
+                               TextWrapping="Wrap" FontSize="12"/>
+                </Border>
+
+                <!-- Files that did not arrive and that no rule accounts for. The
+                     count alone would say "142 skipped" and vanish with the window;
+                     the names are the part nothing else can supply. -->
+                <Border Margin="0,10,0,0" Padding="12,8" CornerRadius="6"
+                        Background="#22FF6B6B" BorderBrush="#66FF6B6B" BorderThickness="1"
+                        Visibility="{Binding HasNotCopied, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="{Binding NotCopiedText}" Foreground="#FFFF9A9A"
                                TextWrapping="Wrap" FontSize="12"/>
                 </Border>
 
@@ -210,10 +267,28 @@
                 <Border Height="44" VerticalAlignment="Center" Margin="0,4,0,8"
                         FlowDirection="LeftToRight"
                         Visibility="{Binding HasSpeedGraph, Converter={StaticResource BoolToVisibility}}">
-                    <Polyline Points="{Binding SpeedGraph}"
-                              Stroke="{DynamicResource Accent}" StrokeThickness="1.4"
-                              StrokeLineJoin="Round" Opacity="0.85"
-                              Stretch="Fill" ClipToBounds="True"/>
+                    <!-- Stroke lives in the style, not as an attribute: a local
+                         value outranks a setter, and the paused trigger would
+                         never win. -->
+                    <Polyline Points="{Binding SpeedGraph}" StrokeThickness="1.4"
+                              StrokeLineJoin="Round"
+                              Stretch="Fill" ClipToBounds="True">
+                        <Polyline.Style>
+                            <Style TargetType="Polyline">
+                                <Setter Property="Stroke" Value="{DynamicResource Accent}"/>
+                                <Setter Property="Opacity" Value="0.85"/>
+                                <Style.Triggers>
+                                    <!-- The line is frozen while paused, so it has
+                                         to look frozen. Left in the accent colour
+                                         it reads as a live copy holding steady. -->
+                                    <DataTrigger Binding="{Binding IsPaused}" Value="True">
+                                        <Setter Property="Stroke" Value="{DynamicResource Warning}"/>
+                                        <Setter Property="Opacity" Value="0.55"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Polyline.Style>
+                    </Polyline>
                 </Border>
 
                 <TextBlock Text="{Binding CurrentFile}" Foreground="{DynamicResource Muted}"
@@ -250,19 +325,36 @@
 
             <!-- Counters sit next to the actions and appear only when they have
                  something to say. A skip is never silent. -->
+            <!-- Two columns, not one cell with two children. Under RightToLeft
+                 WPF mirrors the layout axis, so HorizontalAlignment="Left" resolves
+                 to the *visual right* — which is where the buttons already are, and
+                 the counters were being drawn straight on top of them. Columns make
+                 the separation structural instead of depending on getting a mirrored
+                 alignment right. -->
             <Grid Grid.Row="5">
-                <StackPanel Orientation="Horizontal">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>   <!-- actions, at the flow start -->
+                    <ColumnDefinition Width="*"/>      <!-- counters, at the far end -->
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
                     <Button x:Name="PauseButton" Style="{StaticResource Chip}"
                             Content="{Binding PauseLabel}" Click="OnPauseClick"
                             IsEnabled="{Binding IsRunning}"/>
+                    <!-- CanCancel, not IsRunning: the copy stops before the job does,
+                         and the phase in between can sit waiting on a permission
+                         prompt with no other way out. -->
                     <Button x:Name="CancelButton" Style="{StaticResource Chip}"
                             Content="בטל" Click="OnCancelClick"
-                            IsEnabled="{Binding IsRunning}"/>
+                            IsEnabled="{Binding CanCancel}"/>
                     <Button x:Name="CloseButton" Style="{StaticResource Chip}"
                             Content="סגור" Click="OnCloseClick"/>
                 </StackPanel>
 
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <!-- Right, meaning the visual left: the axis is mirrored here. -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal"
+                            HorizontalAlignment="Right" VerticalAlignment="Center"
+                            Margin="14,0,0,0">
                     <TextBlock Text="{Binding PendingText}" Foreground="{DynamicResource Warning}"
                                Margin="0,0,14,0" VerticalAlignment="Center"
                                Visibility="{Binding HasPending, Converter={StaticResource BoolToVisibility}}"/>

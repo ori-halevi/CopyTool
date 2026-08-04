@@ -140,10 +140,16 @@ internal sealed class App : Application
     /// </summary>
     private void Schedule(string jobFilePath)
     {
+        if (!IsOurJobFile(jobFilePath))
+        {
+            Reject(jobFilePath, "outside the jobs directory", Text.JobNotRecognised);
+            return;
+        }
+
         JobSpec? job = JobSpec.TryLoad(jobFilePath, out string error);
         if (job is null)
         {
-            HostLog.Write($"rejected {jobFilePath}: {error}");
+            Reject(jobFilePath, error, Text.JobNotRecognised);
             return;
         }
 
@@ -165,6 +171,55 @@ internal sealed class App : Application
 
         Interlocked.Increment(ref _running);
         _chains[volume] = RunChainedAsync(previous, jobFilePath, job, operation, control, policies, vm);
+    }
+
+    /// <summary>
+    /// Whether a job file is one the shell extension wrote.
+    ///
+    /// The pipe carries a path, and anything running as this user can connect to
+    /// it. Without this check that path could be any file anywhere, which turns
+    /// the host into a deputy: the caller chooses the destination, and a
+    /// destination under <c>C:\Windows</c> makes CopyTool raise its own "approve
+    /// permissions" banner over a job the user never asked for. One trusted click
+    /// away from an elevated write. Confining jobs to the directory the extension
+    /// writes to costs nothing and closes it.
+    /// </summary>
+    private static bool IsOurJobFile(string path)
+    {
+        try
+        {
+            string root = Path.TrimEndingDirectorySeparator(
+                              Path.GetFullPath(Path.Combine(HostLog.Directory, "jobs")))
+                          + Path.DirectorySeparatorChar;
+
+            return Path.GetFullPath(path).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Says no, visibly.
+    ///
+    /// A drop that produces nothing at all is the worst answer this program can
+    /// give: the user picked a menu item and the machine did nothing, with the
+    /// explanation in a log file they do not know exists. The blocked-job row is
+    /// already the shape of "we did not do this, and here is why".
+    /// </summary>
+    private void Reject(string jobFilePath, string reason, string shown)
+    {
+        HostLog.Write($"rejected {jobFilePath}: {reason}");
+
+        // Not disposed: the row stays on screen, and its bindings keep reading this
+        // control. A rejection is rare enough that one live handle costs nothing.
+        var vm = new JobViewModel("מעתיק", "", new JobControl(), new JobPolicies());
+
+        ShowQueue();
+        _queue.Add(vm);
+        vm.Block(shown);
+        vm.Settle();
     }
 
     /// <summary>The volume a path lands on: two jobs sharing one must not overlap.</summary>
@@ -277,6 +332,19 @@ internal sealed class App : Application
                 () => ElevationCheck.Run(job.Sources, job.Destination), control.Token);
 
             ScanResult scan = await Task.Run(() => Scanner.Scan(job.Sources, control.Token));
+
+            // Dropping something onto the folder it came from is a duplication, not
+            // a collision: there is only one file, and the person is asking for a
+            // second copy of it. Renaming here rather than letting the conflict
+            // machinery see it is what keeps the dialog for the case that actually
+            // warrants one — two different files, in another folder, sharing a name.
+            //
+            // Before the preflight, so its name checks see the names that will
+            // really be written. Copy only: a move onto its own folder moves
+            // nothing, and the preflight blocks it by saying so.
+            if (operation == CopyOperation.Copy)
+                scan = Duplication.Rename(job.Sources, scan, job.Destination);
+
             var (tiny, small, medium, large) = scan.Histogram;
             HostLog.Write($"  scan: {scan.FileCount:N0} files, {scan.TotalBytes / 1024.0 / 1024:N1} MB " +
                           $"(tiny={tiny} small={small} medium={medium} large={large})");
@@ -314,33 +382,90 @@ internal sealed class App : Application
             // whatever it runs into later on.
             await elevation.PrepareAsync(check.AnythingNeedsElevation, control.Token);
 
-            report = await engine.RunAsync(scan, job.Destination, operation, control.Token);
+            // Task.Run, not a bare await: RunAsync does real work before its first
+            // await — it creates the whole destination tree, profiles both volumes
+            // and, for a same-volume move, performs every single rename. All of
+            // that ran on the dispatcher, so the window that exists to show the job
+            // progressing was frozen solid for the duration of the biggest jobs.
+            report = await Task.Run(() => engine.RunAsync(scan, job.Destination, operation, control.Token));
 
             vm.Finish(report, cancelled: control.IsCancelled);
 
-            CopyReport? resolved = await ResolveConflictsAsync(report, engine, vm, control);
+            // Every other skip is a rule the user set playing out as written. These
+            // are the ones where a file is simply not there and only its name says
+            // which — so they are also the only ones the job stays on screen for.
+            // Shown now, before the dialog, so a locked file is on screen while the
+            // conflicts are being decided.
+            vm.SetNotCopied(Text.DescribeNotCopied([.. report.SkippedAfterError]));
+
+            ConflictOutcome conflicts = await ResolveConflictsAsync(report, engine, vm, control, operation);
+            CopyReport? resolved = conflicts.Copied;
+
+            // A question that was asked and not answered belongs here too. The file
+            // is not copied either way, but "I chose to skip it" and "I closed the
+            // window" are not the same fact, and only one of them is already known
+            // to the person who did it.
+            string[] notCopied = Text.DescribeNotCopied(
+                [.. report.SkippedAfterError], conflicts.Unanswered);
+            vm.SetNotCopied(notCopied);
+
+            // The report's count is what the copy parked; by now the questions have
+            // been put, so only what nobody answered is still waiting.
+            vm.SetPending(conflicts.Unanswered.Count);
             bool elevationResolved = await ResolveElevationAsync(elevation, vm, policies, control);
+
+            // Copied under elevation after the engine had already removed the
+            // sources it knew about, so a move has to finish the job here.
+            if (operation == CopyOperation.Move)
+                DeleteLateMovedSources(elevation.ArrivedSources);
 
             if (elevation.Copied > 0 || elevation.Failed > 0)
                 HostLog.Write($"  elevated: {elevation.Copied:N0} copied, {elevation.Failed:N0} failed");
 
+            foreach (CopyFailure f in elevation.Failures.Take(20))
+                HostLog.Write($"  ELEVATED FAILED {f.Source}: {f.Reason}");
+
             if (resolved is not null)
                 HostLog.Write($"  conflicts resolved: {resolved.FilesCopied:N0} copied, " +
                               $"{resolved.Failures.Count} failed");
-            HostLog.Write($"  done: {report.FilesCopied:N0} files, {report.BytesCopied / 1024.0 / 1024:N1} MB " +
+            // Skipped and parked counts belong on this line. Without them "scan: 5
+            // files → done: 1 file" with no failures reads as four files silently
+            // lost, and the only way to tell that apart from four files correctly
+            // skipped as identical was to go and look at the destination.
+            string accounted =
+                (report.Skipped.Count > 0 ? $", {report.Skipped.Count:N0} skipped" : "") +
+                (report.Pending.Count > 0 ? $", {report.Pending.Count:N0} pending" : "") +
+                (report.Failures.Count > 0 ? $", {report.Failures.Count:N0} failed" : "") +
+                (report.Verified > 0 ? $", {report.Verified:N0} verified" : "");
+
+            HostLog.Write($"  done: {report.FilesCopied:N0} of {report.FilesCopied + report.Skipped.Count + report.Pending.Count + report.Failures.Count:N0} files" +
+                          $"{accounted} — {report.BytesCopied / 1024.0 / 1024:N1} MB " +
                           $"in {report.Elapsed.TotalSeconds:F2}s ({report.BytesPerSecond / 1024 / 1024:F0} MB/s) " +
                           $"[{report.Strategy}]");
+
+            foreach (IGrouping<SkipReason, SkippedItem> group in report.Skipped.GroupBy(s => s.Reason))
+                HostLog.Write($"  skipped {group.Count():N0}: {group.Key}");
 
             foreach (CopyFailure f in report.Failures.Take(20))
                 HostLog.Write($"  FAILED {f.Source}: {f.Reason}");
 
-            // Keep the job on disk unless it truly finished, so a crash or a
-            // cancellation leaves something to retry.
-            if (report.Failures.Count == 0 && !control.IsCancelled && elevationResolved)
-            {
-                TryDelete(jobFilePath);
-                Retire(vm);
-            }
+            // Two separate questions, and they used to share one answer.
+            //
+            // The job file exists so that a crash or a cancellation leaves
+            // something to retry. A job that ran to the end has nothing to retry —
+            // including one that skipped what it was told to skip. "Skip protected
+            // items" is an instruction being followed, not an unfinished job, and
+            // treating it as one left a file on disk for ever that nothing ever
+            // reads back and that the uninstaller reports as recoverable work.
+            bool ranToTheEnd = report.Failures.Count == 0 && !control.IsCancelled;
+            bool nothingLeftToAsk = elevationResolved
+                                    || policies.Elevation == ElevationPolicy.SkipProtected;
+
+            if (ranToTheEnd && nothingLeftToAsk) Files.TryDelete(jobFilePath);
+
+            // The row, on the other hand, is the only record of anything that did
+            // not arrive — so it stays whenever there is such a thing to record.
+            if (ranToTheEnd && elevationResolved && notCopied.Length == 0) Retire(vm);
         }
         catch (OperationCanceledException)
         {
@@ -350,10 +475,41 @@ internal sealed class App : Application
         catch (Exception e)
         {
             HostLog.Write($"  job {job.Id} threw: {e}");
+
+            // Without this the row stays "running" for ever, with Pause and Cancel
+            // still enabled over a JobControl that is about to be disposed — so the
+            // one thing the user can do to a wedged job throws.
+            vm.Block(Text.UnexpectedFailure);
         }
         finally
         {
+            vm.Settle();
             vm.ElevationRequested -= OnElevationRequested;
+        }
+    }
+
+    /// <summary>
+    /// Removes the sources of a move that only arrived after the engine finished —
+    /// an answered conflict, or a file the elevated worker wrote.
+    ///
+    /// The engine deletes sources at the end of its own pass, so anything copied
+    /// after that is invisible to it and the move quietly left both copies in
+    /// place: the user asked to move and got a duplicate, with nothing saying so.
+    /// The rule itself is unchanged, and it is the rule that matters — delete only
+    /// what demonstrably landed, never what merely failed to be a failure.
+    /// </summary>
+    private static void DeleteLateMovedSources(IEnumerable<string> sources)
+    {
+        foreach (string source in sources)
+        {
+            try
+            {
+                File.Delete(source);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                HostLog.Write($"  move: source kept, could not remove {source}: {e.Message}");
+            }
         }
     }
 
@@ -370,63 +526,126 @@ internal sealed class App : Application
     }
 
     /// <summary>
-    /// Deals with whatever the copy could not write for permission reasons.
-    ///
-    /// By the time this runs the rest of the job is already done — which is the
-    /// whole point. Walking away from a copy and coming back to a finished one
-    /// should not depend on having answered a permission prompt in between.
-    /// </summary>
-    /// <summary>
     /// Shows the parked conflicts and copies whatever the user decided to keep.
     ///
     /// This runs after the copy, never during it — the whole reason those items
     /// were parked is that a question must not hold up the other 99%.
     /// </summary>
-    private async Task<CopyReport?> ResolveConflictsAsync(
-        CopyReport report, CopyEngine engine, JobViewModel vm, JobControl control)
+    /// <summary>
+    /// What came of the parked questions: what the user chose to copy, and what
+    /// they closed the window on without answering.
+    /// </summary>
+    private sealed record ConflictOutcome(
+        CopyReport? Copied, IReadOnlyList<PendingDecision> Unanswered)
+    {
+        public static readonly ConflictOutcome Nothing = new(null, []);
+    }
+
+    /// <summary>
+    /// Puts the question and returns what to copy, plus whatever went unanswered.
+    ///
+    /// Two windows, because the answer is nearly always the same for all of it:
+    /// four choices first, and the side-by-side list only for someone who says
+    /// they want to decide per item. Coming back out of that list returns here
+    /// rather than abandoning the question — leaving for good is what closing this
+    /// window is for.
+    ///
+    /// One view model across the whole loop, so a trip into the list and back does
+    /// not throw away the choices made in it.
+    /// </summary>
+    private (List<(string Source, string Destination, long Size)>? List, List<PendingDecision> Unanswered)
+        Ask(IReadOnlyList<PendingDecision> answerable)
+    {
+        var vm = new ConflictViewModel(answerable);
+        Window? owner = _window is { IsLoaded: true } w ? w : null;
+
+        while (true)
+        {
+            var choice = new ConflictChoiceWindow(vm) { Owner = owner };
+            choice.ShowDialog();
+            HostLog.Write($"  conflicts: {answerable.Count:N0} parked, answered {choice.Action}");
+
+            switch (choice.Action)
+            {
+                case ConflictAction.DecidePerFile:
+                    var details = new ConflictWindow(vm) { Owner = owner };
+                    if (details.ShowDialog() == true) return (details.Result, details.Unanswered);
+                    continue;                       // "back" — ask the four again
+
+                default:
+                    vm.ApplyToAll(choice.Action switch
+                    {
+                        ConflictAction.ReplaceAll => ConflictChoice.Replace,
+                        ConflictAction.KeepBothAll => ConflictChoice.KeepBoth,
+
+                        // Closing the window lands here on purpose. Shutting a
+                        // question is an answer to it — do not copy these — and it
+                        // is the same answer as picking "skip", so it carries the
+                        // same weight. Treating it as *unanswered* instead would
+                        // have reported back a decision the user had just made,
+                        // which is the thing this deliberately never does.
+                        _ => ConflictChoice.Skip,
+                    });
+
+                    return (vm.BuildCopyList(), []);
+            }
+        }
+    }
+
+    private async Task<ConflictOutcome> ResolveConflictsAsync(
+        CopyReport report, CopyEngine engine, JobViewModel vm, JobControl control, CopyOperation operation)
     {
         // Permission items are answered by a UAC prompt, not by this dialog.
         var answerable = report.NeedsAnswer.ToArray();
-        if (answerable.Length == 0 || control.IsCancelled) return null;
+        if (answerable.Length == 0 || control.IsCancelled) return ConflictOutcome.Nothing;
 
         // Two jobs on different disks can finish within the same second; stacked
         // modal dialogs are how a user ends up answering the wrong one's questions.
         await _dialogGate.WaitAsync(control.Token);
-        bool? answer;
         List<(string Source, string Destination, long Size)>? list;
+        List<PendingDecision> unanswered;
         try
         {
-            var vmConflicts = new ConflictViewModel(answerable);
-            var dialog = new ConflictWindow(vmConflicts)
-            {
-                Owner = _window is { IsLoaded: true } w ? w : null,
-            };
-            answer = dialog.ShowDialog();
-            list = dialog.Result;
+            (list, unanswered) = Ask(answerable);
         }
         finally
         {
             _dialogGate.Release();
         }
 
-        if (answer != true || list is not { Count: > 0 })
-        {
-            HostLog.Write($"  conflicts: {answerable.Length} left unresolved");
-            return null;
-        }
+        if (unanswered.Count > 0)
+            HostLog.Write($"  conflicts: {unanswered.Count:N0} of {answerable.Length:N0} left unanswered");
+
+        if (list is not { Count: > 0 })
+            return new ConflictOutcome(null, unanswered);
 
         vm.SetConflictProgress($"מעתיק {list.Count:N0} פריטים שנבחרו…");
+
+        // Collected as they land rather than derived afterwards, for the same
+        // reason the engine's own move does it that way: "not a failure" is not
+        // the same as "arrived", and only one of the two may delete a source.
+        var moved = new List<string>();
+
         try
         {
-            return await engine.CopyExplicitAsync(list, ct: control.Token);
+            CopyReport copied = await engine.CopyExplicitAsync(
+                list,
+                onFileDone: (source, _, _) =>
+                {
+                    if (operation == CopyOperation.Move) moved.Add(source);
+                },
+                ct: control.Token);
+
+            return new ConflictOutcome(copied, unanswered);
         }
         catch (OperationCanceledException)
         {
-            return null;
+            return new ConflictOutcome(null, unanswered);
         }
         finally
         {
             vm.SetConflictProgress(null);
+            DeleteLateMovedSources(moved);
         }
     }
 
@@ -444,6 +663,11 @@ internal sealed class App : Application
     {
         if (await elevation.FinishAsync(control.Token).ConfigureAwait(false)) return true;
         if (control.IsCancelled) return false;
+
+        // Consent was given and the worker still could not write these. Waiting for
+        // the user to press "approve" again would be waiting for something that has
+        // already happened and did not help.
+        if (elevation.HasFailures) return false;
 
         // Nothing more to ask for: the answer is already settled.
         if (policies.Elevation == ElevationPolicy.SkipProtected || !Elevation.CanElevate) return false;
@@ -472,7 +696,17 @@ internal sealed class App : Application
         elevation.Opened += OnOpened;
         try
         {
-            return await decided.Task;
+            // Bounded by the job's own cancellation. Unbounded, a single protected
+            // file that nobody answered for held this job open for ever: the next
+            // job queued behind it on the same disk never started, and the host —
+            // which counts this one as running — never reached its idle timeout and
+            // never exited. Closing the window was the only way out, and closing is
+            // documented as *not* cancelling.
+            return await decided.Task.WaitAsync(control.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
         }
         finally
         {
@@ -508,13 +742,16 @@ internal sealed class App : Application
                 }
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            catch (Exception e)
             {
+                // Deliberately every exception. Anything that escaped this loop
+                // killed the listener while the process stayed alive holding the
+                // single-instance mutex — so every later drop was delivered to a
+                // host that was no longer listening, and vanished without a trace.
+                // A broken connection is never worth giving up the endpoint for.
                 HostLog.Write($"pipe error: {e.Message}");
                 await Task.Delay(200, CancellationToken.None);
             }
         }
     }
-
-    private static void TryDelete(string path) => Files.TryDelete(path);
 }

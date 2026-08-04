@@ -21,6 +21,7 @@ if (args.Length < 2)
           conflict <workdir>                    run every conflict policy over one fixture
           elevation <path>                      token state and whether <path> is writable
           preflight <source> <destination>      every check that runs before a copy
+          sweep   <large-file> <destination>    queue depth vs throughput, measured
         """);
     return 1;
 }
@@ -41,6 +42,7 @@ try
         case "conflict": await ConflictMatrix(args[1]); break;
         case "elevation": ElevationReport(args[1]); break;
         case "preflight": PreflightReport(args[1], args[2]); break;
+        case "sweep": await Sweep(args[1], args[2]); break;
         case "whoislocking":
         {
             IReadOnlyList<string> holders = LockFinder.WhoIsUsing(args[1]);
@@ -69,7 +71,7 @@ static void Profile(string path)
     Console.WriteLine($"filesystem        {p.FileSystem}");
     Console.WriteLine($"media / bus       {p.Media} / {p.Bus}");
     Console.WriteLine($"sector / cluster  {p.BytesPerSector} / {p.ClusterSize}");
-    Console.WriteLine($"free              {Bytes(p.FreeBytes)}");
+    Console.WriteLine($"free              {Bytes(VolumeProfiler.FreeBytes(path))}");
     Console.WriteLine();
     Console.WriteLine($"large threshold   {Bytes(p.LargeFileThreshold)}");
     Console.WriteLine($"initial workers   {p.InitialWorkers}");
@@ -268,6 +270,62 @@ static void ElevationReport(string path)
     Console.WriteLine($"path              {path}");
     Console.WriteLine($"can write         {Elevation.CanWriteTo(path)}");
     Console.WriteLine($"can read          {(File.Exists(path) || Directory.Exists(path) ? Elevation.CanRead(path).ToString() : "n/a")}");
+}
+
+/// <summary>
+/// Queue depth against throughput, on real hardware with a real file.
+///
+/// The depth the engine uses comes from the volume profile, and that table is a
+/// set of educated guesses — PLAN §8 and §11 both say so, and say the measurement
+/// was never made. This is the measurement: the same file copied at every depth,
+/// three times each, median reported. If the profile's pick is not at or near the
+/// top of this table, the table is wrong.
+/// </summary>
+static async Task Sweep(string source, string destinationDir)
+{
+    var info = new FileInfo(source);
+    VolumeProfile src = VolumeProfiler.ForPath(source);
+    VolumeProfile dst = VolumeProfiler.ForPath(destinationDir);
+    (int chunk, int sector) = FileCopier.PlanChunk(src, dst);
+    int chosen = Math.Min(src.QueueDepth, dst.QueueDepth);
+
+    Console.WriteLine($"file          {Path.GetFileName(source)}   {Bytes(info.Length)}");
+    Console.WriteLine($"source        {src}");
+    Console.WriteLine($"destination   {dst}");
+    Console.WriteLine($"chunk         {Bytes(chunk)}   sector {sector}");
+    Console.WriteLine($"profile picks queue depth {chosen}");
+    Console.WriteLine();
+    Console.WriteLine($"{"queue",6}  {"median",8}  {"rate",12}");
+    Console.WriteLine(new string('-', 32));
+
+    Directory.CreateDirectory(destinationDir);
+    string target = Path.Combine(destinationDir, "_sweep.bin");
+
+    try
+    {
+        foreach (int depth in (int[])[1, 2, 4, 8, 16, 32])
+        {
+            var runs = new List<double>();
+            for (int i = 0; i < 3; i++)
+            {
+                Files.TryDelete(target);
+                var clock = Stopwatch.StartNew();
+                await FileCopier.CopyLargeAsync(
+                    source, target, src, dst, queueDepth: depth, knownSize: info.Length);
+                clock.Stop();
+                runs.Add(clock.Elapsed.TotalSeconds);
+            }
+
+            runs.Sort();
+            double median = runs[1];
+            string mark = depth == chosen ? "  <- profile" : "";
+            Console.WriteLine($"{depth,6}  {median,7:F2}s  {Bytes((long)(info.Length / median)),10}/s{mark}");
+        }
+    }
+    finally
+    {
+        Files.TryDelete(target);
+    }
 }
 
 static void PreflightReport(string source, string destination)

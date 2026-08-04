@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using CopyTool.Core;
 
@@ -75,7 +78,7 @@ internal static class Program
         using var reader = new StreamReader(pipe);
         using var writer = new StreamWriter(pipe) { AutoFlush = true };
 
-        await writer.WriteLineAsync($"hello\t{nonce}");
+        await writer.WriteLineAsync(ElevatedProtocol.Encode("hello", nonce));
 
         var engine = new CopyEngine
         {
@@ -93,58 +96,74 @@ internal static class Program
 
             if (line is null) break;
 
-            string[] parts = line.Split('\t');
+            // An exact field count, not a minimum: a command that does not decode
+            // to precisely four fields is one this worker does not understand, and
+            // guessing at a path it is about to write as administrator is the one
+            // thing it must never do.
+            string[] parts = ElevatedProtocol.Decode(line);
+            if (parts.Length == 0) continue;
             if (parts[0] == "quit") break;
-            if (parts[0] != "copy" || parts.Length < 4) continue;
+            if (parts[0] != "copy" || parts.Length != 4) continue;
 
             string source = parts[1], destination = parts[2];
-            if (!long.TryParse(parts[3], out long size)) size = 0;
+            if (!long.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out long size))
+                size = 0;
 
             try
             {
                 CopyReport report = await engine.CopyExplicitAsync(
                     [(source, destination, size)],
-                    onFileDone: (path, _) => RestoreOwnership(path, settings.OwnerSid),
+                    onFileDone: (_, path, _) => RestoreOwnership(path, settings.OwnerSid),
+                    onDirectoryCreated: path => RestoreOwnership(path, settings.OwnerSid),
                     ct: control.Token);
 
-                if (report.Failures.Count == 0)
-                    await writer.WriteLineAsync($"ok\t{source}\t{size}");
-                else
-                    await writer.WriteLineAsync($"fail\t{source}\t{Sanitise(report.Failures[0].Reason)}");
+                await writer.WriteLineAsync(report.Failures.Count == 0
+                    ? ElevatedProtocol.Encode("ok", source, size.ToString(CultureInfo.InvariantCulture))
+                    : ElevatedProtocol.Encode("fail", source, report.Failures[0].Reason));
             }
             catch (OperationCanceledException) { break; }
             catch (Exception e)
             {
-                Files.TryDelete(destination);
-                await writer.WriteLineAsync($"fail\t{source}\t{Sanitise(e.Message)}");
+                await writer.WriteLineAsync(ElevatedProtocol.Encode("fail", source, e.Message));
             }
         }
 
         return 0;
     }
 
-    /// <summary>Tabs and newlines would corrupt the line protocol.</summary>
-    private static string Sanitise(string s) =>
-        s.Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
-
     /// <summary>
-    /// Gives the file back to the user who asked for the copy. Best-effort: in a
-    /// genuinely protected location the elevated owner is the correct outcome.
+    /// Gives what we created back to the user who asked for the copy. Best-effort:
+    /// in a genuinely protected location the elevated owner is the correct outcome.
+    ///
+    /// Directories matter as much as files here. A folder this worker created stays
+    /// owned by Administrators otherwise, and the user is left with a destination
+    /// they cannot write to or delete — with nothing on screen saying why.
     /// </summary>
     private static void RestoreOwnership(string path, string? ownerSid)
     {
         if (ownerSid is null) return;
         try
         {
-            var sid = new System.Security.Principal.SecurityIdentifier(ownerSid);
+            var sid = new SecurityIdentifier(ownerSid);
+
+            if (Directory.Exists(path))
+            {
+                var dir = new DirectoryInfo(path);
+                DirectorySecurity security = dir.GetAccessControl();
+                security.SetOwner(sid);
+                dir.SetAccessControl(security);
+                return;
+            }
+
             var info = new FileInfo(path);
-            System.Security.AccessControl.FileSecurity security = info.GetAccessControl();
-            security.SetOwner(sid);
-            info.SetAccessControl(security);
+            FileSecurity fileSecurity = info.GetAccessControl();
+            fileSecurity.SetOwner(sid);
+            info.SetAccessControl(fileSecurity);
         }
         catch (Exception e) when (e is UnauthorizedAccessException or IOException
-                                   or System.Security.Principal.IdentityNotMappedException
-                                   or InvalidOperationException or ArgumentException)
+                                   or IdentityNotMappedException
+                                   or InvalidOperationException or ArgumentException
+                                   or PrivilegeNotHeldException)
         {
         }
     }

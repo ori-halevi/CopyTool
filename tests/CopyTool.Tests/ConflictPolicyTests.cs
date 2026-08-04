@@ -128,11 +128,39 @@ public class ConflictPolicyTests
     [InlineData(ConflictPolicy.KeepBoth)]
     [InlineData(ConflictPolicy.KeepNewer)]
     [InlineData(ConflictPolicy.KeepLarger)]
-    public async Task Identical_files_are_skipped_under_every_conflict_policy(ConflictPolicy policy)
+    public async Task Identical_files_obey_their_own_policy_not_the_conflict_one(ConflictPolicy policy)
     {
         // Sameness is decided by its own policy, before the conflict rules get a
-        // say. On a re-run over a large folder this is the difference between
-        // seconds and hours, so it must not depend on which conflict policy is set.
+        // say. Told to skip identical files, the job does so whatever the conflict
+        // chip says — including "keep both", which would otherwise write a needless
+        // second copy of a file that is already there byte for byte.
+        using var fx = new Fixture();
+        fx.WriteSource("a.txt", "identical");
+        fx.WriteDestination("a.txt", "identical");
+
+        CopyReport report = await fx.RunFilesAsync(
+            CopyOperation.Copy,
+            new JobPolicies { Conflict = policy, Identical = IdenticalPolicy.SkipAndReport },
+            "a.txt");
+
+        Assert.Single(report.Skipped);
+        Assert.Equal(SkipReason.Identical, report.Skipped[0].Reason);
+        Assert.Equal(["a.txt"], fx.DestinationNames());     // no "a (2).txt" either
+    }
+
+    [Theory]
+    [InlineData(ConflictPolicy.Ask)]
+    [InlineData(ConflictPolicy.Skip)]
+    [InlineData(ConflictPolicy.Overwrite)]
+    [InlineData(ConflictPolicy.KeepBoth)]
+    [InlineData(ConflictPolicy.KeepNewer)]
+    [InlineData(ConflictPolicy.KeepLarger)]
+    public async Task By_default_an_identical_file_is_asked_about_like_any_other(ConflictPolicy policy)
+    {
+        // The default is to ask. A file being byte-identical is an answer to
+        // "something is already there" — not a reason to stop asking the question.
+        // It used to skip silently, which is how a job could report "4 of 10 files"
+        // with nothing anywhere saying what happened to the other six.
         using var fx = new Fixture();
         fx.WriteSource("a.txt", "identical");
         fx.WriteDestination("a.txt", "identical");
@@ -140,9 +168,12 @@ public class ConflictPolicyTests
         CopyReport report = await fx.RunFilesAsync(
             CopyOperation.Copy, new JobPolicies { Conflict = policy }, "a.txt");
 
-        Assert.Single(report.Skipped);
-        Assert.Equal(SkipReason.Identical, report.Skipped[0].Reason);
-        Assert.Equal(["a.txt"], fx.DestinationNames());     // no "a (2).txt" either
+        PendingDecision parked = Assert.Single(report.Pending);
+        Assert.Equal(DecisionKind.Identical, parked.Kind);
+        Assert.Empty(report.Skipped);
+
+        // Parked, not copied: the destination is untouched until someone answers.
+        Assert.Equal(["a.txt"], fx.DestinationNames());
     }
 
     [Fact]

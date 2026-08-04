@@ -18,7 +18,17 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\common.ps1')
+
+# Runs from two places: the repo (installer\, with scripts\ beside it) and the
+# installed copy, where install.ps1 puts common.ps1 in the same folder so that
+# uninstalling never depends on the repo still existing.
+$common = @(
+    (Join-Path $PSScriptRoot 'common.ps1')
+    (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\common.ps1')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+if (-not $common) { throw 'common.ps1 not found next to this script or in ..\scripts.' }
+. $common
 
 $candidates = @(
     (Join-Path $env:LOCALAPPDATA 'CopyTool\bin')

@@ -12,6 +12,13 @@ public sealed record ScanResult
     public required IReadOnlyList<ScanItem> Files { get; init; }
     /// <summary>Relative directory paths, parents before children, ready to create in order.</summary>
     public required IReadOnlyList<string> Directories { get; init; }
+
+    /// <summary>
+    /// The same directories as they exist at the source, absolute. A move has to
+    /// remove them once their contents have gone, and the relative paths alone
+    /// cannot say where they were.
+    /// </summary>
+    public required IReadOnlyList<string> SourceDirectories { get; init; }
     public required long TotalBytes { get; init; }
     /// <summary>Reparse points that were not followed, reported so the caller can decide.</summary>
     public required IReadOnlyList<string> SkippedReparsePoints { get; init; }
@@ -58,6 +65,7 @@ public static class Scanner
     {
         public readonly List<ScanItem> Files = [];
         public readonly List<string> Dirs = [];
+        public readonly List<string> SourceDirs = [];
         public readonly List<string> Reparse = [];
         public readonly List<string> Inaccessible = [];
         public int PlaceholderCount;
@@ -96,7 +104,7 @@ public static class Scanner
         foreach (string source in sources)
         {
             ct.ThrowIfCancellationRequested();
-            string full = Path.GetFullPath(source.TrimEnd(Path.DirectorySeparatorChar));
+            string full = Files.FullPath(source);
 
             FileAttributes attrs;
             try { attrs = File.GetAttributes(full); }
@@ -134,12 +142,14 @@ public static class Scanner
             }
 
             dirs.Add(name);
+            state.SourceDirs.Add(full);
             total += WalkDirectory(full, name, state, ct);
         }
 
         return new ScanResult
         {
-            Files = files, Directories = dirs, TotalBytes = total,
+            Files = files, Directories = dirs, SourceDirectories = state.SourceDirs,
+            TotalBytes = total,
             SkippedReparsePoints = reparse, Inaccessible = inaccessible,
             PlaceholderCount = state.PlaceholderCount,
             PlaceholderBytes = state.PlaceholderBytes,
@@ -195,6 +205,7 @@ public static class Scanner
                 if (entry is DirectoryInfo)
                 {
                     dirs.Add(childRel);
+                    state.SourceDirs.Add(entry.FullName);
                     pending.Push((entry.FullName, childRel));
                 }
                 else if (entry is FileInfo fi)

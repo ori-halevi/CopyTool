@@ -25,7 +25,18 @@ public sealed class JobViewModel : INotifyPropertyChanged
         Destination = destination;
         _control = control;
         Policies = policies;
-        _control.PausedChanged += _ => { Notify(nameof(IsPaused)); Notify(nameof(PauseLabel)); };
+        _control.PausedChanged += _ =>
+        {
+            // The rate is measured over a sliding window. Carried across a pause
+            // it would average the resumed copy against however long the gate was
+            // shut, so the first seconds after "המשך" would read far slower than
+            // the disk is actually going.
+            _rateWindow.Clear();
+
+            Notify(nameof(IsPaused));
+            Notify(nameof(PauseLabel));
+            Notify(nameof(Eta));
+        };
 
         Chips =
         [
@@ -41,10 +52,10 @@ public sealed class JobViewModel : INotifyPropertyChanged
 
             new PolicyChip("זהים",
             [
-                new PolicyOption("דלג ודווח", IdenticalPolicy.SkipAndReport),
                 new PolicyOption("שאל", IdenticalPolicy.Ask),
+                new PolicyOption("דלג ודווח", IdenticalPolicy.SkipAndReport),
                 new PolicyOption("העתק בכל זאת", IdenticalPolicy.CopyAnyway),
-            ], () => policies.Identical, v => policies.Identical = (IdenticalPolicy)v, IdenticalPolicy.SkipAndReport),
+            ], () => policies.Identical, v => policies.Identical = (IdenticalPolicy)v, IdenticalPolicy.Ask),
 
             new PolicyChip("נעול",
             [
@@ -98,6 +109,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
             Notify();
             Notify(nameof(StatusText));
             Notify(nameof(IsQueued));
+            Notify(nameof(Eta));
         }
     }
 
@@ -135,7 +147,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
         ? _summary ?? "הושלם"
         : $"{Operation} {ItemCount} ← {Destination}";
 
-    private string ItemCount => _filesTotal == 1 ? "פריט אחד" : $"{_filesTotal:N0} פריטים";
+    private string ItemCount => Text.Items(_filesTotal);
 
     /// <summary>
     /// Numbers only, rendered left-to-right. Kept apart from <see cref="Eta"/>
@@ -152,13 +164,22 @@ public sealed class JobViewModel : INotifyPropertyChanged
         get
         {
             if (_finished) return "";
+
+            // Selecting a queued row puts it in the detail area, where "מחשב…"
+            // would claim we are working out a number for a job that has not
+            // started. It is waiting its turn, and that is the whole answer.
+            if (_status == JobStatus.Queued) return "ממתין בתור";
+
+            if (_control.IsPaused) return "מושהה";
             if (_bytesPerSecond <= 0 || _bytesDone >= _bytesTotal) return "מחשב…";
 
-            var left = TimeSpan.FromSeconds((_bytesTotal - _bytesDone) / _bytesPerSecond);
-            if (left.TotalHours >= 1) return $"נותרו {left.Hours} שעות ו-{left.Minutes} דקות";
-            if (left.TotalMinutes >= 1) return $"נותרו {left.Minutes} דקות";
-            int seconds = Math.Max(1, left.Seconds);
-            return seconds == 1 ? "נותרה שנייה" : $"נותרו {seconds} שניות";
+            double seconds = (_bytesTotal - _bytesDone) / _bytesPerSecond;
+
+            // A rate that has just collapsed towards zero produces a number no
+            // TimeSpan can hold. Saying nothing beats throwing inside a binding.
+            if (double.IsNaN(seconds) || seconds > TimeSpan.MaxValue.TotalSeconds) return "מחשב…";
+
+            return Text.Remaining(TimeSpan.FromSeconds(seconds));
         }
     }
 
@@ -190,6 +211,14 @@ public sealed class JobViewModel : INotifyPropertyChanged
 
     private void SampleRate()
     {
+        // A pause is not a stall, and the graph must not draw it as one. The
+        // engine keeps reporting every 200 ms while the workers sit at the gate,
+        // so left sampling the window fills with zeros: the line sinks to the
+        // floor, and once every sample is zero HasSpeedGraph goes false and the
+        // graph disappears altogether. Freezing it holds the last shape on
+        // screen, which is what a paused copy actually looks like.
+        if (_control.IsPaused) return;
+
         // The engine reports far more often than the graph needs; one point per
         // ~200 ms keeps the window meaningful rather than a jittering blur.
         if (++_sinceLastSample < 2) return;
@@ -224,6 +253,28 @@ public sealed class JobViewModel : INotifyPropertyChanged
     public string PauseLabel => _control.IsPaused ? "המשך" : "השהה";
     public bool IsRunning => !_finished;
 
+    private bool _settled;
+
+    /// <summary>
+    /// Whether cancelling is still meaningful.
+    ///
+    /// Deliberately not <see cref="IsRunning"/>: the copy stops before the job
+    /// does. Afterwards come the parked questions — a resolution pass that can
+    /// itself copy for a long time, and a wait for a permission prompt that may
+    /// never be answered. Both were unreachable by the Cancel button, which left
+    /// closing the window as the only way out of a job that had stopped moving,
+    /// and closing is explicitly not cancelling.
+    /// </summary>
+    public bool CanCancel => !_settled && !_control.IsCancelled;
+
+    /// <summary>The job is over, whatever the outcome. Nothing left to cancel.</summary>
+    public void Settle()
+    {
+        if (_settled) return;
+        _settled = true;
+        Notify(nameof(CanCancel));
+    }
+
     private int _pendingCount, _skippedCount;
 
     private string? _conflictProgress;
@@ -233,6 +284,20 @@ public sealed class JobViewModel : INotifyPropertyChanged
         ?? (_pendingCount == 1 ? "ממתין להחלטה אחת" : $"{_pendingCount:N0} ממתינים להחלטה");
 
     public bool HasPending => _conflictProgress is not null || _pendingCount > 0;
+
+    /// <summary>
+    /// What is still waiting, once the questions have actually been put.
+    ///
+    /// The count taken from the report is what the copy parked. After the dialog
+    /// it is only what nobody answered — and leaving the old number up claims the
+    /// job is still waiting on something it settled a moment ago.
+    /// </summary>
+    public void SetPending(int count)
+    {
+        _pendingCount = count;
+        Notify(nameof(PendingText));
+        Notify(nameof(HasPending));
+    }
 
     public void SetConflictProgress(string? message)
     {
@@ -273,6 +338,24 @@ public sealed class JobViewModel : INotifyPropertyChanged
         _warnings = warnings;
         Notify(nameof(HasWarnings));
         Notify(nameof(WarningsText));
+    }
+
+    // --- what did not arrive -------------------------------------------------
+    private string[] _notCopied = [];
+
+    /// <summary>
+    /// Files that did not make it, by name. Only the ones a rule cannot account
+    /// for — a locked file, an I/O error — so this stays a handful of lines rather
+    /// than a second report of what the user already decided.
+    /// </summary>
+    public bool HasNotCopied => _notCopied.Length > 0;
+    public string NotCopiedText => string.Join("\n", _notCopied);
+
+    public void SetNotCopied(string[] lines)
+    {
+        _notCopied = lines;
+        Notify(nameof(HasNotCopied));
+        Notify(nameof(NotCopiedText));
     }
 
     // --- elevation banner ---------------------------------------------------
@@ -390,7 +473,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
             ? $"בוטל — {report.FilesCopied:N0} מתוך {_filesTotal:N0} הועתקו"
             : report.Failures.Count > 0
                 ? $"הושלם עם {report.Failures.Count} שגיאות — {Format.Bytes(report.BytesCopied)} ב-{seconds}"
-                : $"הושלם — {report.FilesCopied:N0} פריטים, {Format.Bytes(report.BytesCopied)} ב-{seconds}"
+                : $"הושלם — {Text.Items(report.FilesCopied)}, {Format.Bytes(report.BytesCopied)} ב-{seconds}"
                   + (report.Verified > 0 ? $", {report.Verified:N0} אומתו" : "");
 
         Status = JobStatus.Finished;
@@ -398,7 +481,13 @@ public sealed class JobViewModel : INotifyPropertyChanged
     }
 
     public void TogglePause() => _control.Toggle();
-    public void Cancel() => _control.Cancel();
+
+    public void Cancel()
+    {
+        if (_settled) return;              // the control may already be disposed
+        _control.Cancel();
+        Notify(nameof(CanCancel));
+    }
 
     private void NotifyAll()
     {
@@ -408,6 +497,7 @@ public sealed class JobViewModel : INotifyPropertyChanged
         Notify(nameof(PendingText)); Notify(nameof(HasPending));
         Notify(nameof(SkippedText)); Notify(nameof(HasSkipped));
         Notify(nameof(StatusText));
+        Notify(nameof(CanCancel));
         NotifyElevation();
     }
 

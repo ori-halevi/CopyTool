@@ -82,6 +82,70 @@ public class PreflightTests
     }
 
     [Fact]
+    public void A_job_larger_than_the_disk_is_blocking()
+    {
+        using var fx = new Fixture();
+        fx.WriteSource("a.txt", new string('x', 5000));
+
+        ScanResult scan = Scanner.Scan([fx.Source]);
+        PreflightResult result = Preflight.Run(
+            [fx.Source], fx.Destination, scan, CopyOperation.Copy, freeSpace: _ => 100);
+
+        Assert.False(result.CanProceed);
+        PreflightIssue issue = Assert.Single(result.Blocking, i => i.Code == PreflightCode.NotEnoughSpace);
+        Assert.Equal(5000, issue.Bytes);
+        Assert.Equal(100, issue.OtherBytes);
+    }
+
+    [Fact]
+    public void Bytes_the_destination_already_holds_are_not_demanded_again()
+    {
+        // Re-copying a tree that is already there writes nothing, so refusing it
+        // for want of room is a refusal to do nothing — which is exactly what a
+        // near-full backup drive would have hit on every repeat run.
+        using var fx = new Fixture();
+        fx.WriteSource("a.txt", new string('x', 5000));
+        fx.WriteDestination(Path.Combine("src", "a.txt"), new string('x', 5000));
+
+        ScanResult scan = Scanner.Scan([fx.Source]);
+        PreflightResult result = Preflight.Run(
+            [fx.Source], fx.Destination, scan, CopyOperation.Copy, freeSpace: _ => 100);
+
+        Assert.True(result.CanProceed);
+        Assert.DoesNotContain(result.Issues, i => i.Code == PreflightCode.NotEnoughSpace);
+    }
+
+    [Fact]
+    public void A_destination_file_that_differs_still_needs_room()
+    {
+        // Same name, different content: this one really will be written, so the
+        // shortcut must not swallow it.
+        using var fx = new Fixture();
+        fx.WriteSource("a.txt", new string('x', 5000));
+        fx.WriteDestination(Path.Combine("src", "a.txt"), new string('y', 20), TimeSpan.FromHours(3));
+
+        ScanResult scan = Scanner.Scan([fx.Source]);
+        PreflightResult result = Preflight.Run(
+            [fx.Source], fx.Destination, scan, CopyOperation.Copy, freeSpace: _ => 100);
+
+        Assert.False(result.CanProceed);
+    }
+
+    [Fact]
+    public void Plenty_of_room_raises_nothing()
+    {
+        using var fx = new Fixture();
+        fx.WriteSource("a.txt", new string('x', 5000));
+
+        ScanResult scan = Scanner.Scan([fx.Source]);
+        PreflightResult result = Preflight.Run(
+            [fx.Source], fx.Destination, scan, CopyOperation.Copy, freeSpace: _ => 1L << 40);
+
+        Assert.True(result.CanProceed);
+        Assert.Empty(result.Issues);
+    }
+
+    [Fact]
     public void A_move_onto_its_own_folder_is_blocking()
     {
         using var fx = new Fixture();

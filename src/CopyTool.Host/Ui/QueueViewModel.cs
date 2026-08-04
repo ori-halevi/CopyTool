@@ -21,12 +21,27 @@ public sealed class QueueViewModel : INotifyPropertyChanged
 
     /// <summary>
     /// The job shown in full. Everything else is a one-line row.
+    ///
+    /// Settable, and bound to the list's selection: clicking a row brings that job
+    /// into the detail area, and the pause and cancel buttons follow it there. That
+    /// is what makes it possible to cancel a job waiting its turn without
+    /// cancelling the one that is running — which, with no way to select, could
+    /// only be done by cancelling the wrong job first.
+    ///
+    /// The automatic hand-over still applies, but only when the shown job has
+    /// finished, so it never takes the detail area away from something the user
+    /// deliberately brought up.
     /// </summary>
     public JobViewModel? Primary
     {
         get => _primary;
-        private set
+        set
         {
+            // A list clears its selection when the selected row is removed. That is
+            // a job finishing, not a request to empty the detail area, so fall back
+            // to whatever should be shown in its place.
+            value ??= PickPrimary();
+
             if (ReferenceEquals(_primary, value)) return;
 
             if (_primary is not null) _primary.IsPrimary = false;

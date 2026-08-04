@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
@@ -92,7 +93,7 @@ public sealed class ElevationSession : IAsyncDisposable
             _writer = new StreamWriter(_pipe) { AutoFlush = true };
 
             string? hello = await _reader.ReadLineAsync(connect.Token).ConfigureAwait(false);
-            if (hello != $"hello\t{nonce}")
+            if (hello != ElevatedProtocol.Encode("hello", nonce))
             {
                 HostLog.Write("elevated worker failed the handshake");
                 await CleanupAsync();
@@ -110,37 +111,53 @@ public sealed class ElevationSession : IAsyncDisposable
         return (ElevationOutcome.Completed, ElevationError.None);
     }
 
-    /// <summary>Copies one item through the worker. False means it did not land.</summary>
-    public async Task<bool> CopyAsync(string source, string destination, long size, CancellationToken ct = default)
+    /// <summary>
+    /// Copies one item through the worker.
+    ///
+    /// Returns why it did not land, not merely that it did not. The caller has
+    /// already taken the item off the engine's pending queue by this point, so a
+    /// bare false left nothing anywhere that said the file was never copied — and
+    /// the job went on to report itself complete.
+    /// </summary>
+    public async Task<(bool Ok, string Error)> CopyAsync(
+        string source, string destination, long size, CancellationToken ct = default)
     {
-        if (!IsOpen || _writer is null || _reader is null) return false;
+        if (!IsOpen || _writer is null || _reader is null)
+            return (false, "the elevated worker is not running");
 
         try
         {
-            await _writer.WriteLineAsync($"copy\t{source}\t{destination}\t{size}").ConfigureAwait(false);
+            await _writer.WriteLineAsync(
+                ElevatedProtocol.Encode("copy", source, destination,
+                                        size.ToString(CultureInfo.InvariantCulture)))
+                .ConfigureAwait(false);
+
             string? reply = await _reader.ReadLineAsync(ct).ConfigureAwait(false);
 
             if (reply is null)
             {
                 IsOpen = false;                      // worker went away
-                return false;
+                return (false, "the elevated worker stopped");
             }
 
-            if (reply.StartsWith("ok\t", StringComparison.Ordinal))
+            string[] parts = ElevatedProtocol.Decode(reply);
+
+            if (parts.Length >= 1 && parts[0] == "ok")
             {
                 Copied++;
                 Bytes += size;
-                return true;
+                return (true, "");
             }
 
             Failed++;
-            HostLog.Write($"  elevated FAILED {source}: {reply}");
-            return false;
+            string reason = parts.Length >= 3 ? parts[2] : reply;
+            HostLog.Write($"  elevated FAILED {source}: {reason}");
+            return (false, reason);
         }
         catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException)
         {
             IsOpen = false;
-            return false;
+            return (false, e.Message);
         }
     }
 

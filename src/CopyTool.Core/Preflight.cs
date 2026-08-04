@@ -70,13 +70,19 @@ public static class Preflight
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     };
 
+    /// <param name="freeSpace">
+    /// How much room the destination has. Injectable only so the space rules can be
+    /// tested — the branch that matters is the one that refuses a job, and a test
+    /// cannot fill a disk to reach it.
+    /// </param>
     public static PreflightResult Run(
-        IReadOnlyList<string> sources, string destinationRoot, ScanResult scan, CopyOperation operation)
+        IReadOnlyList<string> sources, string destinationRoot, ScanResult scan, CopyOperation operation,
+        Func<string, long>? freeSpace = null)
     {
         var issues = new List<PreflightIssue>();
 
         CheckPaths(sources, destinationRoot, operation, issues);
-        CheckFreeSpace(destinationRoot, scan, operation, issues);
+        CheckFreeSpace(destinationRoot, scan, operation, freeSpace ?? VolumeProfiler.FreeBytes, issues);
         CheckFilesystemLimits(destinationRoot, scan, issues);
         CheckNames(scan, issues);
         CheckCloudPlaceholders(scan, issues);
@@ -127,27 +133,100 @@ public static class Preflight
     }
 
     private static void CheckFreeSpace(
-        string destinationRoot, ScanResult scan, CopyOperation operation, List<PreflightIssue> issues)
+        string destinationRoot, ScanResult scan, CopyOperation operation,
+        Func<string, long> freeSpace, List<PreflightIssue> issues)
     {
-        VolumeProfile dst = VolumeProfiler.ForPath(destinationRoot);
+        long needed = BytesThatMustBeWritten(destinationRoot, scan, operation);
+        if (needed <= 0) return;
 
-        // A move within one volume is a rename: it needs no space at all.
-        if (operation == CopyOperation.Move && scan.Files.Count > 0 &&
-            VolumeProfiler.SameVolume(scan.Files[0].SourcePath, destinationRoot))
-            return;
+        // Read now, not from the volume profile: the profile is cached for the life
+        // of the process, and free space is exactly the property that does not hold
+        // still — least of all between two copies onto the same disk.
+        long free = freeSpace(destinationRoot);
+        if (free <= 0) return;                          // unknown, e.g. a network share
 
-        if (dst.FreeBytes <= 0) return;                 // unknown, e.g. a network share
-
-        if (scan.TotalBytes > dst.FreeBytes)
+        if (needed > free)
         {
-            issues.Add(new PreflightIssue(IssueSeverity.Blocking, PreflightCode.NotEnoughSpace,
-                                          Bytes: scan.TotalBytes, OtherBytes: dst.FreeBytes));
+            // On the point of refusing the job, so it is now worth a metadata read
+            // per file to find out whether those bytes would really be written.
+            // Re-copying a tree the destination already holds needs no room at all,
+            // and blocking that is refusing to do nothing.
+            needed -= BytesAlreadyThere(destinationRoot, scan);
+
+            if (needed > free)
+            {
+                issues.Add(new PreflightIssue(IssueSeverity.Blocking, PreflightCode.NotEnoughSpace,
+                                              Bytes: needed, OtherBytes: free));
+                return;
+            }
         }
-        else if (dst.FreeBytes - scan.TotalBytes < Math.Min(1L << 30, dst.FreeBytes / 20))
+
+        if (free - needed < Math.Min(1L << 30, free / 20))
         {
             issues.Add(new PreflightIssue(IssueSeverity.Warning, PreflightCode.LittleSpaceLeft,
-                                          Bytes: dst.FreeBytes - scan.TotalBytes));
+                                          Bytes: free - needed));
         }
+    }
+
+    /// <summary>
+    /// Bytes the destination already holds in identical form.
+    ///
+    /// Same size and same timestamp within the tolerance — the test the engine
+    /// itself uses to decide a file is already there. For such a file the space
+    /// required is zero under every policy: skipping writes nothing, parking writes
+    /// nothing, and copying anyway replaces a file of exactly that size. "Keep
+    /// both" cannot apply, because sameness is settled before the conflict rules
+    /// get a say.
+    /// </summary>
+    private static long BytesAlreadyThere(string destinationRoot, ScanResult scan)
+    {
+        long already = 0;
+
+        foreach (ScanItem file in scan.Files)
+        {
+            try
+            {
+                var destination = new FileInfo(Path.Combine(destinationRoot, file.RelativePath));
+                if (!destination.Exists || destination.Length != file.Size) continue;
+
+                DateTime source = file.Modified != default
+                    ? file.Modified
+                    : ConflictResolver.SafeWriteTime(file.SourcePath);
+
+                if ((source - destination.LastWriteTimeUtc).Duration() > ConflictResolver.TimeTolerance)
+                    continue;
+
+                already += file.Size;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                // Cannot tell, so assume we will have to write it. Erring towards
+                // refusing beats promising room that is not there.
+            }
+        }
+
+        return already;
+    }
+
+    /// <summary>
+    /// How much has to be written at the destination.
+    ///
+    /// A move within one volume is a rename and needs no space at all — but that
+    /// is decided per file, not from the first one. A multi-selection can span
+    /// volumes, which is the same assumption the engine's rename path had to stop
+    /// making: judging the whole job by <c>Files[0]</c> skipped the space check
+    /// entirely whenever the first file happened to be on the destination volume.
+    /// </summary>
+    private static long BytesThatMustBeWritten(string destinationRoot, ScanResult scan, CopyOperation operation)
+    {
+        if (operation != CopyOperation.Move) return scan.TotalBytes;
+
+        long needed = 0;
+        foreach (ScanItem file in scan.Files)
+        {
+            if (!VolumeProfiler.SameVolume(file.SourcePath, destinationRoot)) needed += file.Size;
+        }
+        return needed;
     }
 
     private static void CheckFilesystemLimits(string destinationRoot, ScanResult scan, List<PreflightIssue> issues)
@@ -160,7 +239,7 @@ public static class Preflight
             || dst.FileSystem.Equals("exFAT", StringComparison.OrdinalIgnoreCase)
             || dst.Media == MediaKind.Network;
 
-        if (!isFat && !restrictedNames) return;
+        if (!restrictedNames) return;
 
         // One pass for both questions rather than a Count() each.
         int tooBig = 0, hostile = 0;

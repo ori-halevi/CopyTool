@@ -30,7 +30,20 @@ public enum VerifyPolicy { Off, EveryFile }
 public sealed class JobPolicies
 {
     public ConflictPolicy Conflict { get; set; } = ConflictPolicy.Ask;
-    public IdenticalPolicy Identical { get; set; } = IdenticalPolicy.SkipAndReport;
+
+    /// <summary>
+    /// Ask, like every other question whose answer has not been given.
+    ///
+    /// This defaulted to skipping, on the reasoning that re-copying identical bytes
+    /// achieves nothing — which is true, and beside the point. Someone who leaves
+    /// "ask" set on name conflicts has said they want to be asked when a name is
+    /// already taken, and a file being byte-identical is an answer *to* that
+    /// question, not a reason to skip asking it. Explorer asks about these too.
+    ///
+    /// The chip still offers "skip and report", and setting it once makes it stick
+    /// for good — which is the part Explorer cannot do.
+    /// </summary>
+    public IdenticalPolicy Identical { get; set; } = IdenticalPolicy.Ask;
     public LockedPolicy Locked { get; set; } = LockedPolicy.Retry;
     public IoErrorPolicy IoError { get; set; } = IoErrorPolicy.RetryThrice;
     public ElevationPolicy Elevation { get; set; } = ElevationPolicy.Ask;

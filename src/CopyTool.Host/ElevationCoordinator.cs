@@ -64,8 +64,15 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
         }
 
         // A second click while the prompt is up would mean two dialogs and two
-        // workers.
-        if (Interlocked.Exchange(ref _opening, 1) == 1) return false;
+        // workers. Returning early has to put the view model back too: the button
+        // disabled itself on the click, and only a message re-enables it — so
+        // without this the banner stayed dead for the rest of the job because of a
+        // click that was correctly ignored.
+        if (Interlocked.Exchange(ref _opening, 1) == 1)
+        {
+            _vm.SetElevationMessage("ממתין לאישור הרשאות מנהל…", resolved: false);
+            return false;
+        }
 
         try
         {
@@ -123,6 +130,42 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
         }, CancellationToken.None);
     }
 
+    /// <summary>
+    /// Everything the worker was handed and did not copy.
+    ///
+    /// <see cref="CopyEngine.TryTakePending"/> removes the item from the engine's
+    /// queue, so once we have taken it this list is the only record it ever
+    /// existed. Without it a failed elevated copy left no trace anywhere the job
+    /// looks: nothing pending, nothing failed, and the job reported itself
+    /// complete while the file had not been written.
+    /// </summary>
+    private readonly List<CopyFailure> _failures = [];
+
+    /// <summary>
+    /// Sources the worker did copy. A move has to delete these itself: they landed
+    /// after the engine had already run its own source deletion, so as far as it
+    /// is concerned they never arrived.
+    /// </summary>
+    private readonly List<string> _arrived = [];
+
+    private readonly Lock _outcomes = new();
+
+    public IReadOnlyList<CopyFailure> Failures
+    {
+        get { lock (_outcomes) return _failures.ToArray(); }
+    }
+
+    /// <summary>Sources that reached the destination through the elevated worker.</summary>
+    public IReadOnlyList<string> ArrivedSources
+    {
+        get { lock (_outcomes) return _arrived.ToArray(); }
+    }
+
+    public bool HasFailures
+    {
+        get { lock (_outcomes) return _failures.Count > 0; }
+    }
+
     /// <summary>Copies everything currently parked. Returns true if it did any work.</summary>
     private async Task<bool> DrainOnceAsync(CancellationToken ct)
     {
@@ -132,9 +175,19 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
                _engine.TryTakePending(DecisionKind.NeedsElevation, out PendingDecision item))
         {
             didWork = true;
-            bool ok = await _session.CopyAsync(item.Source, item.Destination, item.SourceSize, ct)
-                                    .ConfigureAwait(false);
-            if (!ok && !_session.IsOpen)
+            (bool ok, string error) = await _session
+                .CopyAsync(item.Source, item.Destination, item.SourceSize, ct)
+                .ConfigureAwait(false);
+
+            lock (_outcomes)
+            {
+                if (ok) _arrived.Add(item.Source);
+                else _failures.Add(new CopyFailure(item.Source, item.Destination, error));
+            }
+
+            if (ok) continue;
+
+            if (!_session.IsOpen)
             {
                 _vm.SetElevationMessage(Text.Describe(ElevationError.WorkerStopped), resolved: false);
                 break;
@@ -163,12 +216,32 @@ internal sealed class ElevationCoordinator : IAsyncDisposable
         if (_session.IsOpen) await DrainOnceAsync(ct).ConfigureAwait(false);
 
         int remaining = _engine.CountPending(DecisionKind.NeedsElevation);
-        if (remaining == 0)
+        IReadOnlyList<CopyFailure> failed = Failures;
+
+        if (remaining == 0 && failed.Count == 0)
         {
             if (_session.Copied > 0)
                 HostLog.Write($"  elevated: {_session.Copied} copied, {_session.Failed} failed");
             _vm.SetElevationMessage(null, resolved: true);
             return true;
+        }
+
+        // A file the worker tried and could not write is not waiting for consent —
+        // consent was already given. Saying so is the difference between the user
+        // knowing the job is incomplete and being told it finished.
+        if (failed.Count > 0)
+        {
+            // The count deliberately excludes the failures: it drives the "approve"
+            // button, and there is nothing left to approve for a file consent was
+            // already granted for. An enabled button that cannot help is worse than
+            // no button.
+            _vm.SetElevationNeeded(remaining);
+            _vm.SetElevationMessage(
+                failed.Count == 1
+                    ? "פריט אחד מוגן לא הועתק"
+                    : $"{failed.Count:N0} פריטים מוגנים לא הועתקו",
+                resolved: false);
+            return false;
         }
 
         _vm.SetElevationNeeded(remaining);

@@ -72,11 +72,11 @@ internal static class Program
         if (outcome != ElevationOutcome.Completed) return 1;
 
         long size = new FileInfo(source).Length;
-        bool first = await session.CopyAsync(
+        (bool first, _) = await session.CopyAsync(
             source, Path.Combine(destinationDir, Path.GetFileName(source)), size);
 
         // Sent only after the first one landed: a one-shot worker could not do this.
-        bool second = await session.CopyAsync(
+        (bool second, _) = await session.CopyAsync(
             source, Path.Combine(destinationDir, "second-" + Path.GetFileName(source)), size);
 
         HostLog.Write($"SELFTEST elevate: first={first} second={second} " +

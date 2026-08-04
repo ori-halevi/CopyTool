@@ -48,6 +48,20 @@ public sealed record CopyReport
     public IEnumerable<PendingDecision> NeedsAnswer =>
         Pending.Where(p => p.Kind != DecisionKind.NeedsElevation);
 
+    /// <summary>
+    /// Items skipped because reading or writing them went wrong — as opposed to
+    /// skipped by a preference.
+    ///
+    /// The distinction is whether anything is missing afterwards. A file skipped as
+    /// identical is already at the destination, and one skipped because the
+    /// destination was newer lost to a rule its owner chose: in both cases the
+    /// policy already told them what would happen. A locked file simply did not
+    /// arrive, and the rule cannot say *which* file it was or what was holding it —
+    /// which makes these the only skips with anything left to report.
+    /// </summary>
+    public IEnumerable<SkippedItem> SkippedAfterError =>
+        Skipped.Where(s => s.Reason is SkipReason.Locked or SkipReason.IoError);
+
     public double BytesPerSecond => Elapsed.TotalSeconds > 0 ? BytesCopied / Elapsed.TotalSeconds : 0;
 }
 
@@ -146,6 +160,16 @@ public sealed class CopyEngine
     private ThroughputController? _controller;
 
     /// <summary>
+    /// The file most recently started, for the progress line.
+    ///
+    /// The small-file path used to report nothing here, so a job made entirely of
+    /// small files — which is most of them — showed an empty line where the
+    /// current file belongs, and looked exactly the same whether it was working
+    /// through 60,000 files or wedged on one.
+    /// </summary>
+    private string? _currentFile;
+
+    /// <summary>
     /// Destination directories that permissions prevented us from creating. The
     /// whole tree is created up front, so an exact set is enough — no prefix
     /// matching and no per-file syscall.
@@ -237,6 +261,11 @@ public sealed class CopyEngine
 
             if (renamed > 0 && remaining.Count == 0)
             {
+                // Every file left; the folders they were in have to go too. This
+                // is the common move, so leaving it out of the fast path meant the
+                // cleanup effectively never ran.
+                DeleteEmptySourceDirectories(scan);
+
                 return new CopyReport
                 {
                     BytesCopied = scan.TotalBytes, FilesCopied = renamed, Elapsed = clock.Elapsed,
@@ -271,7 +300,10 @@ public sealed class CopyEngine
             .ConfigureAwait(false);
 
         if (operation == CopyOperation.Move)
+        {
             DeleteMovedSources(failures);
+            DeleteEmptySourceDirectories(scan);
+        }
 
         string strategy = $"{small.Length} small via CopyFileEx, {large.Length} large via unbuffered pipeline";
 
@@ -289,16 +321,26 @@ public sealed class CopyEngine
     }
 
     /// <summary>
-    /// Copies an explicit list of source→destination pairs, overwriting whatever
+    /// Name of the file a replacement is assembled in before it takes the
+    /// destination's place. Beside the destination on purpose — same directory
+    /// means same volume, which is what makes the final step a rename.
+    /// </summary>
+    private const string StagingSuffix = ".copytool-part";
+
+    /// <summary>
+    /// Copies an explicit list of source→destination pairs, replacing whatever
     /// is there.
     ///
     /// Used once the user has answered the questions the job parked earlier, and
     /// by the elevated worker. Policies do not apply here: the decision has
     /// already been made, and re-asking would be absurd.
     /// </summary>
+    /// <param name="onFileDone">Source, destination and size of each item that landed.</param>
+    /// <param name="onDirectoryCreated">Every directory this call had to create, parents first.</param>
     public async Task<CopyReport> CopyExplicitAsync(
         IReadOnlyList<(string Source, string Destination, long Size)> items,
-        Action<string, long>? onFileDone = null,
+        Action<string, string, long>? onFileDone = null,
+        Action<string>? onDirectoryCreated = null,
         CancellationToken ct = default)
     {
         var clock = Stopwatch.StartNew();
@@ -312,13 +354,24 @@ public sealed class CopyEngine
             ct.ThrowIfCancellationRequested();
             Control?.WaitWhilePaused(ct);
 
+            // Assembled beside the destination and renamed over it at the very
+            // end. Writing straight onto the destination meant that any failure —
+            // an unreadable source, a lock taken a second ago — left the user with
+            // neither file: the copy never happened and the original was gone.
+            // This path exists *because* the user chose to replace something they
+            // still have, so destroying it on the way is the one unacceptable
+            // outcome. The rename is also atomic, which the overwrite never was.
+            string staging = destination + StagingSuffix;
+
             try
             {
                 string? dir = Path.GetDirectoryName(destination);
-                if (dir is not null) Directory.CreateDirectory(dir);
+                if (dir is not null) CreateDirectoryChain(dir, onDirectoryCreated);
+
+                Files.TryDelete(staging);
 
                 await FileCopier.CopyOneAsync(
-                    source, destination, size,
+                    source, staging, size,
                     b =>
                     {
                         Interlocked.Add(ref bytes, b);
@@ -333,17 +386,19 @@ public sealed class CopyEngine
                     },
                     Control, Policies.BackgroundIo, ct).ConfigureAwait(false);
 
+                FileCopier.Replace(staging, destination);
+
                 copied++;
-                onFileDone?.Invoke(destination, size);
+                onFileDone?.Invoke(source, destination, size);
             }
             catch (OperationCanceledException)
             {
-                Files.TryDelete(destination);
+                Files.TryDelete(staging);
                 throw;
             }
             catch (Exception e)
             {
-                Files.TryDelete(destination);
+                Files.TryDelete(staging);
                 failures.Add(new CopyFailure(source, destination, e.Message));
             }
         }
@@ -358,6 +413,33 @@ public sealed class CopyEngine
             Skipped = [],
             Pending = [],
         };
+    }
+
+    /// <summary>
+    /// Creates a directory and reports every level it had to make, parents first.
+    ///
+    /// Reporting only the leaf would be wrong for the elevated worker, which uses
+    /// this to hand ownership back: <c>CreateDirectory</c> makes the whole chain,
+    /// and any level left owned by Administrators is a folder the user cannot
+    /// afterwards write to or delete.
+    /// </summary>
+    private static void CreateDirectoryChain(string directory, Action<string>? onCreated)
+    {
+        if (Directory.Exists(directory)) return;
+
+        if (onCreated is null)
+        {
+            Directory.CreateDirectory(directory);
+            return;
+        }
+
+        var made = new List<string>();
+        for (string? p = directory; p is not null && !Directory.Exists(p); p = Path.GetDirectoryName(p))
+            made.Add(p);
+
+        Directory.CreateDirectory(directory);
+
+        for (int i = made.Count - 1; i >= 0; i--) onCreated(made[i]);
     }
 
     /// <summary>
@@ -436,6 +518,7 @@ public sealed class CopyEngine
                             continue;
                         }
 
+                        Volatile.Write(ref _currentFile, item.RelativePath);
                         CopySmallWithPolicy(item, dst, failures, ct);
 
                         if (Volatile.Read(ref active) > Math.Min(controller.Workers, workerCeiling)) break;
@@ -816,6 +899,37 @@ public sealed class CopyEngine
         }
     }
 
+    /// <summary>
+    /// Removes the folders a move emptied. A move that leaves the folder behind
+    /// has not moved it — the user is left tidying up a skeleton of empty
+    /// directories by hand.
+    ///
+    /// Deepest first, never recursive, never forced. <c>Directory.Delete</c>
+    /// without recursion refuses a directory that still holds anything, and that
+    /// refusal is the safety property: whatever the job parked for a decision,
+    /// skipped, or failed on is still down there, and its folder has to stay with
+    /// it. The same allow-list discipline as <see cref="DeleteMovedSources"/>,
+    /// enforced by the filesystem instead of by a list.
+    /// </summary>
+    private static void DeleteEmptySourceDirectories(ScanResult scan)
+    {
+        // Longest path first. A parent is a prefix of its children, so length
+        // descending puts every child ahead of its parent without a sort key that
+        // has to understand paths.
+        foreach (string directory in scan.SourceDirectories.OrderByDescending(d => d.Length))
+        {
+            try
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, recursive: false);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Still holds something, or is not ours to remove. Leaving it is
+                // the correct outcome in both cases.
+            }
+        }
+    }
+
     private void ReportProgress(ScanResult scan, string? current = null)
     {
         Progress?.Report(new CopyProgress
@@ -826,7 +940,7 @@ public sealed class CopyEngine
             FilesTotal = scan.FileCount,
             BytesPerSecond = _controller?.CurrentRate ?? 0,
             Workers = _controller?.Workers ?? 1,
-            CurrentFile = current,
+            CurrentFile = current ?? Volatile.Read(ref _currentFile),
             // Interlocked counters rather than ConcurrentBag.Count: Count freezes
             // the bag by taking every per-thread lock, and this runs five times a
             // second while workers are pushing into those same bags.

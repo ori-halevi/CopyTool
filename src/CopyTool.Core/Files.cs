@@ -62,6 +62,22 @@ public static class Files
         _ => 0,
     };
 
+    /// <summary>
+    /// Full path of <paramref name="path"/>, without letting a drive root collapse
+    /// into something else.
+    ///
+    /// <c>Path.GetFullPath("C:")</c> does not mean <c>C:\</c> — it means the
+    /// process's current directory *on* drive C. Anything that trims a trailing
+    /// separator before resolving has to put it back, or a dragged drive root
+    /// silently resolves to wherever the program happens to be running from.
+    /// </summary>
+    public static string FullPath(string path)
+    {
+        string trimmed = path.TrimEnd(Path.DirectorySeparatorChar);
+        if (trimmed.EndsWith(':')) trimmed += Path.DirectorySeparatorChar;
+        return Path.GetFullPath(trimmed);
+    }
+
     /// <summary>Reads a value from an argument list of the form <c>--flag value</c>.</summary>
     public static string? Arg(string[] args, string name)
     {

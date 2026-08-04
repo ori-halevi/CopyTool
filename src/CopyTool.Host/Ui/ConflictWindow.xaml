@@ -12,11 +12,54 @@
         Background="#FF202020" Foreground="#FFF3F3F3">
 
     <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+
         <SolidColorBrush x:Key="Surface"    Color="#FF202020"/>
         <SolidColorBrush x:Key="SurfaceAlt" Color="#FF2B2B2B"/>
         <SolidColorBrush x:Key="Muted"      Color="#FFA0A0A0"/>
         <SolidColorBrush x:Key="Accent"     Color="#FF4CC2FF"/>
         <SolidColorBrush x:Key="Border"     Color="#FF3A3A3A"/>
+
+        <!-- One fact about one side of the comparison. The four styles below differ
+             only in which flag they watch: the value that wins its axis is set in
+             SemiBold, so the thing you are choosing between is legible at a glance
+             instead of requiring two numbers to be read and subtracted. This is
+             what the built-in Windows copy dialog does with the newer date. -->
+        <Style x:Key="Fact" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+
+        <Style x:Key="SourceSize" TargetType="TextBlock" BasedOn="{StaticResource Fact}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SourceIsLarger}" Value="True">
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SourceDate" TargetType="TextBlock" BasedOn="{StaticResource Fact}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SourceIsNewer}" Value="True">
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DestinationSize" TargetType="TextBlock" BasedOn="{StaticResource Fact}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding DestinationIsLarger}" Value="True">
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DestinationDate" TargetType="TextBlock" BasedOn="{StaticResource Fact}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding DestinationIsNewer}" Value="True">
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
 
         <Style x:Key="Flat" TargetType="Button">
             <Setter Property="Background" Value="{DynamicResource SurfaceAlt}"/>
@@ -55,6 +98,7 @@
             <RowDefinition Height="Auto"/>   <!-- header -->
             <RowDefinition Height="Auto"/>   <!-- bulk actions -->
             <RowDefinition Height="*"/>      <!-- list -->
+            <RowDefinition Height="Auto"/>   <!-- clear out the identical ones -->
             <RowDefinition Height="Auto"/>   <!-- footer -->
         </Grid.RowDefinitions>
 
@@ -106,13 +150,52 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
-                                        <StackPanel Grid.Column="0">
+                                        <!-- Each side: label in Hebrew, facts forced
+                                             left-to-right. Size and date are Latin
+                                             runs separated by a neutral, and in an
+                                             RTL paragraph bidi is free to swap
+                                             them — so the date could appear before
+                                             the size it belongs to.
+                                             Double-click opens the file itself, and
+                                             the tooltip is the full path: the name
+                                             alone often is not enough to know which
+                                             of the two you actually want. -->
+                                        <StackPanel Grid.Column="0"
+                                                    ToolTip="{Binding SourcePath}"
+                                                    MouseLeftButtonDown="OnSideDoubleClick"
+                                                    Tag="{Binding SourcePath}"
+                                                    Background="Transparent">
                                             <TextBlock Text="מקור" Foreground="{DynamicResource Muted}" FontSize="11"/>
-                                            <TextBlock Text="{Binding SourceSummary}" FontSize="12"/>
+                                            <StackPanel Orientation="Horizontal"
+                                                        FlowDirection="LeftToRight"
+                                                        HorizontalAlignment="Right">
+                                                <TextBlock Text="{Binding SourceSizeText}"
+                                                           Style="{StaticResource SourceSize}"/>
+                                                <TextBlock Text="  ·  " Style="{StaticResource Fact}"
+                                                           Foreground="{DynamicResource Muted}"
+                                                           Visibility="{Binding HasSourceDate, Converter={StaticResource BoolToVisibility}}"/>
+                                                <TextBlock Text="{Binding SourceDateText}"
+                                                           Style="{StaticResource SourceDate}"/>
+                                            </StackPanel>
                                         </StackPanel>
-                                        <StackPanel Grid.Column="1">
+
+                                        <StackPanel Grid.Column="1"
+                                                    ToolTip="{Binding DestinationPath}"
+                                                    MouseLeftButtonDown="OnSideDoubleClick"
+                                                    Tag="{Binding DestinationPath}"
+                                                    Background="Transparent">
                                             <TextBlock Text="קיים ביעד" Foreground="{DynamicResource Muted}" FontSize="11"/>
-                                            <TextBlock Text="{Binding DestinationSummary}" FontSize="12"/>
+                                            <StackPanel Orientation="Horizontal"
+                                                        FlowDirection="LeftToRight"
+                                                        HorizontalAlignment="Right">
+                                                <TextBlock Text="{Binding DestinationSizeText}"
+                                                           Style="{StaticResource DestinationSize}"/>
+                                                <TextBlock Text="  ·  " Style="{StaticResource Fact}"
+                                                           Foreground="{DynamicResource Muted}"
+                                                           Visibility="{Binding HasDestinationDate, Converter={StaticResource BoolToVisibility}}"/>
+                                                <TextBlock Text="{Binding DestinationDateText}"
+                                                           Style="{StaticResource DestinationDate}"/>
+                                            </StackPanel>
                                         </StackPanel>
                                     </Grid>
                                 </StackPanel>
@@ -129,13 +212,38 @@
             </ListBox>
         </Border>
 
-        <Grid Grid.Row="3" Margin="0,12,0,0">
-            <StackPanel Orientation="Horizontal">
+        <!-- Two columns, not one cell with two children. Under RightToLeft WPF
+             mirrors the layout axis, so HorizontalAlignment="Left" resolves to the
+             *visual right* — where the buttons already are — and the counter was
+             being drawn on top of them. -->
+        <!-- One tick to clear the files that are already there byte for byte,
+             leaving only the conflicts that are really a question. Unticked to
+             start with: they are on this list precisely because skipping them
+             without saying so is what this used to get wrong. -->
+        <CheckBox Grid.Row="3" Margin="2,12,0,0"
+                  IsChecked="{Binding SkipIdentical, Mode=TwoWay}"
+                  Content="{Binding SkipIdenticalLabel}"
+                  Foreground="{DynamicResource Muted}"
+                  Cursor="Hand" HorizontalAlignment="Right"
+                  Visibility="{Binding HasIdentical, Converter={StaticResource BoolToVisibility}}"/>
+
+        <Grid Grid.Row="4" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal">
                 <Button x:Name="ApplyButton" Style="{StaticResource Flat}" Content="בצע" Click="OnApply"/>
-                <Button Style="{StaticResource Flat}" Content="בטל" Click="OnCancel"/>
+                <!-- Back, not cancel: this list is reached from the four-answer
+                     window, and leaving it returns there rather than abandoning
+                     the whole question. -->
+                <Button Style="{StaticResource Flat}" Content="חזרה" Click="OnCancel"/>
             </StackPanel>
-            <TextBlock HorizontalAlignment="Left" VerticalAlignment="Center"
-                       Foreground="{DynamicResource Muted}">
+
+            <!-- Right, meaning the visual left: the axis is mirrored here. -->
+            <TextBlock Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center"
+                       Margin="14,0,0,0" Foreground="{DynamicResource Muted}">
                 <Run Text="ללא החלטה:"/><Run Text=" "/><Run Text="{Binding UndecidedCount, Mode=OneWay}"/>
             </TextBlock>
         </Grid>

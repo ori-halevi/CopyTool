@@ -20,11 +20,12 @@ when you come back**.
 
 | | Windows Explorer | CopyTool |
 |---|---|---|
-| A name conflict | the whole job waits for an answer | the item is parked, **the copy continues**, you answer at the end |
+| A name conflict | a dialog at the end, every time | **a policy decided in advance** — keep newer, keep larger, keep both — so most jobs are never asked at all |
 | Needs admin rights | discovered when it fails, mid-copy | detected before the first byte, banner up at second one |
 | A file is locked | "the file is in use by another program" | **names the program** holding it (Restart Manager) |
 | Not enough space | discovered at 90% | refuses to start, and says by how much |
-| Identical files | copied again | skipped — and never silently |
+| Identical files | asked about, every single time | asked too — or skipped for good, once you say so |
+| Copying a file beside itself | `name - Copy.ext`, no questions | the same, no questions |
 | Same-volume move | copy then delete | **rename: instant, any size** |
 | Three drops in a row | three windows stacking up | one window, one list — same disk in turn, different disks at once |
 
@@ -38,9 +39,20 @@ Measured C: → G: (two NVMe drives), against `robocopy /J /MT:8`:
 | 3,000 small files | **183 MB/s** | 158 MB/s |
 | 60,000 small files | 108 MB/s | 104 MB/s |
 
+Those are the best pair on the machine. Put a slower link in the way and the
+numbers are the link's, not the tool's: from a **SATA** SSD to the same NVMe
+drive, one large file copies at 535 MB/s — about 95% of what SATA III delivers in
+practice, and within a percent of what Explorer gets on the same files. There is
+no version of this tool that goes faster over that cable.
+
 Large files go through an unbuffered, overlapped pipeline whose queue depth comes
 from the device profile — deep for NVMe, shallow for a USB disk, where queuing
 deep only causes seek thrashing and starves everything else on the machine.
+
+The depth is no longer a guess. `CopyTool.Bench sweep <file> <destination>` copies
+one file at every depth and reports the median; on the SATA pair above the curve
+is 273 MB/s at depth 1, then flat within noise from 4 upwards — which is where the
+profile puts it.
 
 There is also a **background I/O priority** mode. On an idle disk it costs nothing
 measurable (2.95 s vs 2.98 s on a 4 GB copy); under contention it yields, so a
@@ -109,6 +121,44 @@ Installs to `%LOCALAPPDATA%\CopyTool\bin` and registers for the current user onl
 .\installer\uninstall.ps1 -Purge   # removes those too
 ```
 
+### Installing on another machine
+
+```powershell
+.\build.ps1
+.\installer\pack.ps1 -Inno -Standalone
+```
+
+Each of these is one file that carries everything it installs. Nothing else has
+to travel with it.
+
+| | | |
+|---|---|---|
+| `CopyTool-0.1.0-win-x64-standalone.exe` | 43 MB | **needs nothing** — the .NET runtime is inside |
+| `CopyTool-0.1.0-win-x64-requires-dotnet9.exe` | 2.2 MB | needs the .NET 9 Desktop Runtime |
+| `Install-CopyTool.ps1` | 430 KB | same as above, without a wizard — and buildable without Inno Setup |
+
+```powershell
+CopyTool-0.1.0-win-x64-standalone.exe                               # or /VERYSILENT
+powershell -ExecutionPolicy Bypass -File .\Install-CopyTool.ps1     # -Uninstall to remove
+```
+
+The standalone build publishes both executables into a single folder so they
+share one copy of the runtime — 399 files and 135 MB, which lzma2 takes down to
+43. Publishing them separately would have shipped the runtime twice.
+
+All of them install per-user into `%LOCALAPPDATA%\CopyTool\bin` with one `HKCU`
+key and no administrator rights — the same rule the rest of the design follows,
+and the reason `PrivilegesRequired=lowest` is in the `.iss`: it is what makes
+`regsvr32` land in `HKCU` instead of `HKLM`.
+
+The two `.exe` installers share an `AppId`, so either replaces the other and
+Add/Remove Programs only ever shows one entry. The `.ps1` copies itself to
+`%LOCALAPPDATA%\CopyTool` during install and points Add/Remove Programs there, so
+removal never depends on still having the file you ran.
+
+Beyond the runtime there is nothing else to chase: the shell extension links the
+CRT statically, so no redistributable is involved either way.
+
 ## Build
 
 ```powershell
@@ -148,7 +198,7 @@ file is the only way to see what it did.
 dotnet test tests\CopyTool.Tests
 ```
 
-61 tests over the real filesystem — the engine is almost entirely about what the
+86 tests over the real filesystem — the engine is almost entirely about what the
 filesystem actually does, so an abstraction would only agree with whatever the
 engine already believes.
 

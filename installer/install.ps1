@@ -68,11 +68,25 @@ $payload = @(
     'CopyTool.Elevated.exe', 'CopyTool.Elevated.dll', 'CopyTool.Elevated.runtimeconfig.json', 'CopyTool.Elevated.deps.json'
     'CopyTool.Core.dll'
 )
+$missing = @()
 foreach ($file in $payload) {
     $from = Join-Path $source $file
     if (Test-Path $from) { Copy-Item $from $target -Force }
-    else { Write-Warning "missing from the build output: $file" }
+    else { $missing += $file }
 }
+if ($missing) {
+    # Registering a half-copied install produces a shell entry that fails at the
+    # moment of use, which is far harder to diagnose than refusing here.
+    throw "Missing from the build output: $($missing -join ', '). Run build.ps1 first."
+}
+
+# The uninstaller has to survive the repo being moved or deleted. It goes to the
+# data directory rather than into $target, because $target is what it deletes —
+# a script that removes the folder it is running from is asking for trouble.
+$dataDir = Join-Path $env:LOCALAPPDATA 'CopyTool'
+New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+Copy-Item (Join-Path $PSScriptRoot 'uninstall.ps1')   $dataDir -Force
+Copy-Item (Join-Path $repoRoot 'scripts\common.ps1')  $dataDir -Force
 
 Write-Host '  registering the drag-drop handler...'
 Invoke-RegSvr32 -Dll $installedDll | Out-Null
@@ -88,7 +102,7 @@ Set-ItemProperty $uninstallRoot 'InstallLocation' $target
 Set-ItemProperty $uninstallRoot 'NoModify'        1 -Type DWord
 Set-ItemProperty $uninstallRoot 'NoRepair'        1 -Type DWord
 Set-ItemProperty $uninstallRoot 'UninstallString' `
-    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'uninstall.ps1')`""
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $dataDir 'uninstall.ps1')`""
 
 $hive   = if ($AllUsers) { 'HKLM:' } else { 'HKCU:' }
 $hooked = Get-CopyToolDragDropKeys $hive |

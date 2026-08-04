@@ -370,6 +370,13 @@ private:
         MessageBoxW(nullptr, text.c_str(), L"CopyTool", MB_OK | MB_ICONINFORMATION);
     }
 
+    // Balances the DllAddRef in the constructor. Without it g_dllRefCount only
+    // ever climbed, so DllCanUnloadNow could never return S_OK and the DLL stayed
+    // pinned inside explorer.exe for the life of the process -- which is also why
+    // a rebuild needed Explorer restarted. ClassFactory got this right; this did
+    // not.
+    ~DragDropHandler() { DllRelease(); }
+
     LONG                      m_ref;
     std::vector<std::wstring> m_sources;
     std::wstring              m_destination;

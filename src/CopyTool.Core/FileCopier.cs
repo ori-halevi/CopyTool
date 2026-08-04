@@ -127,7 +127,13 @@ public static class FileCopier
 
         // Undo the sector padding of the final chunk.
         if (!Win32.SetFileInformationByHandle(dst, Win32.FileEndOfFileInfo, totalSize, sizeof(long)))
-            throw new Win32Exception($"set end-of-file failed: {destination}");
+        {
+            // Captured before the interpolation runs: Win32Exception(string) reads
+            // GetLastError itself, by which point the allocations below may already
+            // have overwritten it.
+            int error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"set end-of-file failed ({error}): {destination}");
+        }
 
         dst.Dispose();
         src.Dispose();
@@ -229,6 +235,31 @@ public static class FileCopier
     {
         uint flags = Win32.MOVEFILE_WRITE_THROUGH | (overwrite ? Win32.MOVEFILE_REPLACE_EXISTING : 0);
         return Win32.MoveFileEx(source, destination, flags);
+    }
+
+    /// <summary>
+    /// Puts <paramref name="staging"/> in place of <paramref name="destination"/>.
+    ///
+    /// The two are in the same directory and therefore on the same volume, so this
+    /// is a rename: at no instant does the destination hold something that is
+    /// neither the old file nor the complete new one. Copying over the destination
+    /// directly could never say that.
+    /// </summary>
+    public static void Replace(string staging, string destination)
+    {
+        // MOVEFILE_REPLACE_EXISTING refuses a read-only target, and a read-only
+        // flag is not a reason to fail a replacement the user explicitly asked for.
+        // Explorer clears it too.
+        Files.TryClearReadOnly(destination);
+
+        if (Win32.MoveFileEx(staging, destination,
+                             Win32.MOVEFILE_WRITE_THROUGH | Win32.MOVEFILE_REPLACE_EXISTING))
+            return;
+
+        // Read the code before anything allocates; Win32Exception(string) would
+        // otherwise call GetLastError after the interpolation had overwritten it.
+        int error = Marshal.GetLastWin32Error();
+        throw new Win32Exception(error, $"replace failed ({error}): {destination}");
     }
 
     private static void CopyMetadata(string source, string destination)

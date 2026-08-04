@@ -103,12 +103,56 @@ public static class ConflictResolver
         for (int n = 2; n < 10000; n++)
         {
             string candidate = Path.Combine(dir, $"{stem} ({n}){ext}");
-            if (!File.Exists(candidate)) return candidate;
+            if (!Occupied(candidate)) return candidate;
         }
 
         // Pathological directory; fall back to something guaranteed unique.
         return Path.Combine(dir, $"{stem} ({Guid.NewGuid():N}){ext}");
     }
+
+    /// <summary>
+    /// The suffix Explorer gives a thing copied into the folder it already lives
+    /// in. Deliberately the literal English form, which is what the file ends up
+    /// called and therefore part of the data rather than of the wording.
+    /// </summary>
+    public const string CopySuffix = " - Copy";
+
+    /// <summary>
+    /// The name for a second copy of something beside itself: "report.txt" becomes
+    /// "report - Copy.txt", and after that "report - Copy (2).txt".
+    ///
+    /// These are the names Explorer produces, and that matters more than it looks:
+    /// this is a gesture people perform constantly and already know the outcome of,
+    /// so inventing a different one would be a surprise with nothing to gain.
+    /// </summary>
+    /// <param name="isDirectory">
+    /// A folder has no extension to preserve. Without this, "My.Photos" would come
+    /// back as "My - Copy.Photos".
+    /// </param>
+    public static string CopyName(string path, bool isDirectory)
+    {
+        string dir = Path.GetDirectoryName(path) ?? "";
+        string stem = isDirectory ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
+        string ext = isDirectory ? "" : Path.GetExtension(path);
+
+        string first = Path.Combine(dir, $"{stem}{CopySuffix}{ext}");
+        if (!Occupied(first)) return first;
+
+        for (int n = 2; n < 10000; n++)
+        {
+            string candidate = Path.Combine(dir, $"{stem}{CopySuffix} ({n}){ext}");
+            if (!Occupied(candidate)) return candidate;
+        }
+
+        return Path.Combine(dir, $"{stem}{CopySuffix} ({Guid.NewGuid():N}){ext}");
+    }
+
+    /// <summary>
+    /// Anything at all at this path. A directory counts: a folder sitting where the
+    /// copy wants to put a file does not collide by name alone, it makes the write
+    /// fail outright.
+    /// </summary>
+    private static bool Occupied(string path) => File.Exists(path) || Directory.Exists(path);
 
     public static DateTime SafeWriteTime(string path)
     {
